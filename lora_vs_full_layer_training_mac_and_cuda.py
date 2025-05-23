@@ -164,9 +164,16 @@ def train_model(model, data, replay_data, key, epochs=1, batch_size=2, accum_ste
             for i in range(0, len(data), batch_size):
                 log_message(f"DEBUG: Processing batch {i//batch_size + 1}, range [{i}:{i+batch_size}]")
                 batch_start = time.time()
-                # Use .select() for datasets instead of slicing
-                batch_indices = list(range(i, min(i + batch_size, len(data))))
-                batch_data = data.select(batch_indices)
+                # Handle both Dataset and dict objects
+                if hasattr(data, 'select'):
+                    # Use .select() for datasets
+                    batch_indices = list(range(i, min(i + batch_size, len(data))))
+                    batch_data = data.select(batch_indices)
+                else:
+                    # Handle dict objects (fallback)
+                    end_idx = min(i + batch_size, len(data))
+                    batch_data = {k: v[i:end_idx] for k, v in data.items()}
+                    
                 log_message(f"DEBUG: batch_data type: {type(batch_data)}, keys: {list(batch_data.keys()) if isinstance(batch_data, dict) else 'not a dict'}")
                 
                 batch = [text for text in batch_data[key] if text and str(text).strip()]
@@ -245,11 +252,19 @@ def train_model(model, data, replay_data, key, epochs=1, batch_size=2, accum_ste
             # Replay data
             if replay_data:
                 log_message("Processing replay data...")
+                log_message(f"DEBUG: replay_data type: {type(replay_data)}")
                 for i in range(0, len(replay_data), batch_size):
                     batch_start = time.time()
-                    # Use .select() for datasets instead of slicing
-                    batch_indices = list(range(i, min(i + batch_size, len(replay_data))))
-                    batch_data = replay_data.select(batch_indices)
+                    # Handle both Dataset and dict objects
+                    if hasattr(replay_data, 'select'):
+                        # Use .select() for datasets
+                        batch_indices = list(range(i, min(i + batch_size, len(replay_data))))
+                        batch_data = replay_data.select(batch_indices)
+                    else:
+                        # Handle dict objects (fallback)
+                        end_idx = min(i + batch_size, len(replay_data))
+                        batch_data = {k: v[i:end_idx] for k, v in replay_data.items()}
+                    
                     batch = [text for text in batch_data[key] if text and str(text).strip()]
                     if not batch:  # Skip empty batches
                         continue
@@ -424,7 +439,7 @@ try:
     log_message("Training LoRA on JavaScript...")
     model_lora = add_transformer_layer(model_lora, config)
     model_lora = get_peft_model(model_lora, lora_config)
-    js_loss_lora, js_time_lora = train_model(model_lora, js_data, replay_data=python_data[:1000], key=key)
+    js_loss_lora, js_time_lora = train_model(model_lora, js_data, replay_data=python_data.select(range(1000)), key=key)
     os.makedirs("lora_javascript", exist_ok=True)
     model_lora.save_pretrained("lora_javascript")
     log_message("Evaluating LoRA on JavaScript...")
@@ -459,7 +474,7 @@ try:
 
     log_message("Training full layer on JavaScript...")
     model_full = add_transformer_layer(model_full, config)
-    js_loss_full, js_time_full = train_model(model_full, js_data, replay_data=python_data[:1000], key=key)
+    js_loss_full, js_time_full = train_model(model_full, js_data, replay_data=python_data.select(range(1000)), key=key)
     log_message("Evaluating full layer on JavaScript...")
     js_bleu_full, js_pass_full = evaluate_model(model_full, js_val, key)
     os.makedirs("full_javascript", exist_ok=True)
