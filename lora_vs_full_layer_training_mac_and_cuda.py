@@ -123,7 +123,9 @@ def train_model(model, data, replay_data, key, epochs=1, batch_size=2, accum_ste
             for i in range(0, len(data), batch_size):
                 batch_start = time.time()
                 batch_data = data[i:i+batch_size]
-                batch = [item[key] for item in batch_data]
+                batch = []
+                for item in batch_data[key]:
+                    batch.append(item)
                 inputs = tokenizer(batch, return_tensors="pt", max_length=128, truncation=True, padding=True).to(device)
                 outputs = model(**inputs, labels=inputs["input_ids"])
                 loss = outputs.loss / accum_steps
