@@ -225,7 +225,7 @@ class LoRAContinualLearner(ContinualLearner):
                     inputs = self.tokenizer(
                         input_text, 
                         return_tensors="pt", 
-                        max_length=256, 
+                        max_length=512, 
                         truncation=True
                     ).to(self.device)
                     
@@ -373,7 +373,7 @@ class FullLayerContinualLearner(ContinualLearner):
                     inputs = self.tokenizer(
                         input_text, 
                         return_tensors="pt", 
-                        max_length=256, 
+                        max_length=512, 
                         truncation=True
                     ).to(self.device)
                     
