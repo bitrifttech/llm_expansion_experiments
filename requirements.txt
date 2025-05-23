@@ -1,0 +1,16 @@
+# Core ML and NLP libraries
+torch>=2.0.0
+numpy>=1.21.0
+transformers>=4.30.0
+datasets>=2.10.0
+peft>=0.4.0
+sentencepiece>=0.1.99
+
+# Evaluation metrics
+nltk>=3.8.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Standard library modules (no need to install)
+# os, sys, time, copy, shutil are part of Python standard library 
