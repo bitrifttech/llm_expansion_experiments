@@ -122,28 +122,58 @@ def freeze_base_model(model):
     log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
 
 def add_trainable_transformer_layer(model):
-    """Add a new trainable transformer layer to the encoder"""
+    """Add a new trainable transformer layer by creating a new model with extended architecture"""
     from copy import deepcopy
     import torch.nn as nn
     
-    # Create a new layer based on the last encoder layer
-    new_layer = deepcopy(model.encoder.block[-1])
-    
-    # Add it to the encoder
-    model.encoder.block.append(new_layer)
-    
-    # Update config
-    model.config.num_layers = len(model.encoder.block)
-    
-    # Initialize new layer parameters with small random values
-    for param in new_layer.parameters():
-        param.data = param.data * 0.01
-        param.requires_grad = True  # Ensure new layer is trainable
-    
-    trainable_params = sum(p.numel() for p in new_layer.parameters() if p.requires_grad)
-    log_message(f"Added trainable transformer layer with {trainable_params:,} parameters")
-    
-    return model
+    try:
+        # Instead of modifying the existing model, create a new one with extended architecture
+        original_config = model.config
+        
+        # Create new config with one additional layer
+        new_config = deepcopy(original_config)
+        new_config.num_layers = original_config.num_layers + 1
+        
+        # Create new model with extended architecture
+        new_model = T5ForConditionalGeneration(new_config).to(model.device)
+        
+        # Copy weights from original model to new model (except the new layer)
+        with torch.no_grad():
+            # Copy encoder layers
+            for i in range(original_config.num_layers):
+                new_model.encoder.block[i].load_state_dict(model.encoder.block[i].state_dict())
+            
+            # Copy decoder layers
+            for i in range(original_config.num_decoder_layers):
+                new_model.decoder.block[i].load_state_dict(model.decoder.block[i].state_dict())
+            
+            # Copy other components
+            new_model.shared.load_state_dict(model.shared.state_dict())
+            new_model.encoder.final_layer_norm.load_state_dict(model.encoder.final_layer_norm.state_dict())
+            new_model.decoder.final_layer_norm.load_state_dict(model.decoder.final_layer_norm.state_dict())
+            new_model.lm_head.load_state_dict(model.lm_head.state_dict())
+        
+        # Freeze all copied parameters
+        for param in new_model.parameters():
+            param.requires_grad = False
+        
+        # Only make the new encoder layer trainable
+        new_layer_idx = original_config.num_layers  # The new layer index
+        for param in new_model.encoder.block[new_layer_idx].parameters():
+            param.requires_grad = True
+            # Initialize with small random values
+            param.data = param.data * 0.01
+        
+        trainable_params = sum(p.numel() for p in new_model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in new_model.parameters())
+        
+        log_message(f"Created new model with additional layer: {trainable_params:,} trainable / {total_params:,} total parameters")
+        
+        return new_model
+        
+    except Exception as e:
+        log_message(f"Error creating extended model: {e}", level="ERROR")
+        raise
 
 class ContinualLearner:
     """Base class for continual learning approaches"""
