@@ -296,13 +296,12 @@ class LoRAContinualLearner(ContinualLearner):
         return np.mean(bleu_scores) if bleu_scores else 0.0, np.mean(pass_scores) if pass_scores else 0.0
 
 class FullLayerContinualLearner(ContinualLearner):
-    """Full layer training with frozen base weights and task-specific new layers"""
+    """New layer training with task-specific layer swapping (fair comparison with LoRA)"""
     
     def __init__(self, model_name: str, tokenizer, device: str):
         super().__init__(model_name, tokenizer, device)
         self.checkpoints = {}
         self.current_task = None
-        self.task_layers = {}  # Track which layers belong to which tasks
         
     def prepare_model(self) -> None:
         """Initialize the base model and freeze its weights"""
@@ -312,20 +311,14 @@ class FullLayerContinualLearner(ContinualLearner):
         log_message(f"Base model prepared with frozen weights")
         
     def train_task(self, train_data, task_name: str, epochs: int = 5, batch_size: int = 16) -> float:
-        """Train new transformer layer for specific task"""
+        """Train new transformer layer for specific task (independent, not cumulative)"""
         log_message(f"Training new transformer layer for {task_name}...")
         
-        # Start with current model state (includes previously added layers)
-        if self.current_model is not None:
-            model = deepcopy(self.current_model)
-        else:
-            model = deepcopy(self.base_model)
+        # Always start with clean base model (like LoRA starts fresh each time)
+        model = deepcopy(self.base_model)
             
-        # Add and configure new trainable layer for this task
+        # Add and configure new trainable layer for this specific task
         model = add_trainable_transformer_layer(model)
-        
-        # Store which layer index belongs to this task
-        self.task_layers[task_name] = len(model.encoder.block) - 1
         
         # Verify only new layer is trainable
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -335,22 +328,18 @@ class FullLayerContinualLearner(ContinualLearner):
         # Train only the new layer
         training_time = self._train_model(model, train_data, epochs, batch_size)
         
-        # Update current model to include the new trained layer
-        self.current_model = model
-        self.current_task = task_name
-        
-        # Save checkpoint
+        # Save task-specific checkpoint (base + this task's layer only)
         checkpoint_path = f"checkpoints/{task_name}"
         os.makedirs(checkpoint_path, exist_ok=True)
         model.save_pretrained(checkpoint_path)
         self.checkpoints[task_name] = checkpoint_path
         
-        log_message(f"Checkpoint for {task_name} saved to {checkpoint_path}")
-        log_message(f"Task {task_name} uses transformer layer {self.task_layers[task_name]}")
+        log_message(f"Task-specific checkpoint for {task_name} saved to {checkpoint_path}")
+        log_message(f"Model architecture: Base (frozen) + {task_name} Layer (trained)")
         return training_time
         
     def switch_to_task(self, task_name: str) -> None:
-        """Switch to specific task checkpoint"""
+        """Switch to specific task checkpoint (base + task-specific layer only)"""
         if task_name not in self.checkpoints:
             raise ValueError(f"No checkpoint found for task {task_name}")
             
@@ -358,14 +347,15 @@ class FullLayerContinualLearner(ContinualLearner):
             self.checkpoints[task_name]
         ).to(self.device)
         self.current_task = task_name
+        log_message(f"Switched to {task_name} model: Base + {task_name} Layer")
         
     def evaluate_task(self, eval_data, task_name: str, num_samples: int = 500) -> Tuple[float, float]:
-        """Evaluate specific task using its checkpoint"""
+        """Evaluate specific task using its own checkpoint (task-specific layer)"""
         self.switch_to_task(task_name)
         return self._evaluate_model(self.current_model, eval_data, num_samples)
         
     def _train_model(self, model, data, epochs: int, batch_size: int) -> float:
-        """Internal training method - only train new layers"""
+        """Internal training method"""
         start_time = time.time()
         
         # Only optimize trainable parameters (new layers)
@@ -519,21 +509,21 @@ def run_single_experiment(learner_class, model_name: str, tokenizer, python_trai
     
     # === STEP 1: TRAIN ON PYTHON ===
     log_message("\n=== STEP 1: TRAINING ON PYTHON ===")
-    python_training_time = learner.train_task(python_train, "python", epochs=5, batch_size=16)
+    python_training_time = learner.train_task(python_train, "python", epochs=2, batch_size=8)
     
     # Evaluate both tasks after Python training
     log_message("Evaluating both tasks after Python training...")
-    python_bleu_after_python, python_pass_after_python = learner.evaluate_task(python_val, "python", num_samples=500)
+    python_bleu_after_python, python_pass_after_python = learner.evaluate_task(python_val, "python", num_samples=100)
     
     # For JavaScript evaluation after Python training, we need to handle this carefully
     # For LoRA: no JS adapter exists yet, so use base model
-    # For Full: use the Python-trained model
+    # For New Layer: no JS layer exists yet, so use base model  
     if isinstance(learner, LoRAContinualLearner):
         # Use base model for JS since no JS adapter exists yet
-        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.base_model, js_val, 500)
+        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.base_model, js_val, 100)
     else:
-        # Use current model (trained on Python) for JS
-        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.current_model, js_val, 500)
+        # Use base model for JS since no JS layer exists yet (fair comparison)
+        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.base_model, js_val, 100)
     
     log_message(f"After Python training:")
     log_message(f"  Python BLEU: {baseline_python_bleu:.4f} → {python_bleu_after_python:.4f} (Δ{python_bleu_after_python-baseline_python_bleu:+.4f})")
@@ -543,12 +533,12 @@ def run_single_experiment(learner_class, model_name: str, tokenizer, python_trai
     
     # === STEP 2: TRAIN ON JAVASCRIPT ===
     log_message("\n=== STEP 2: TRAINING ON JAVASCRIPT ===")
-    js_training_time = learner.train_task(js_train, "javascript", epochs=5, batch_size=16)
+    js_training_time = learner.train_task(js_train, "javascript", epochs=2, batch_size=8)
     
     # Evaluate both tasks after JavaScript training
     log_message("Evaluating both tasks after JavaScript training...")
-    js_bleu_after_js, js_pass_after_js = learner.evaluate_task(js_val, "javascript", num_samples=500)
-    python_bleu_after_js, python_pass_after_js = learner.evaluate_task(python_val, "python", num_samples=500)
+    js_bleu_after_js, js_pass_after_js = learner.evaluate_task(js_val, "javascript", num_samples=100)
+    python_bleu_after_js, python_pass_after_js = learner.evaluate_task(python_val, "python", num_samples=100)
     
     log_message(f"After JavaScript training:")
     log_message(f"  JavaScript BLEU: {js_bleu_after_python:.4f} → {js_bleu_after_js:.4f} (Δ{js_bleu_after_js-js_bleu_after_python:+.4f})")
@@ -691,9 +681,10 @@ def run_statistical_analysis(lora_results: List[ExperimentResults], full_results
 def main():
     """Main experimental function"""
     log_message("Starting LoRA vs New Layer Training Comparison")
-    log_message("Both approaches use FROZEN base weights + task-specific trainable components")
-    log_message("LoRA: Adds small adapter matrices (~0.1% parameters)")
-    log_message("New Layer: Adds full transformer layers (~1-2% parameters)")
+    log_message("FAIR COMPARISON: Both approaches use task-specific component swapping")
+    log_message("LoRA: Frozen base + swappable adapter matrices (~0.1% parameters)")
+    log_message("New Layer: Frozen base + swappable transformer layers (~5% parameters)")
+    log_message("Both: Perfect task isolation, no cross-task interference during training")
     
     # Initialize tokenizer
     model_name = "Salesforce/codet5-small"
@@ -708,7 +699,7 @@ def main():
     python_train, python_val, js_train, js_val = load_and_prepare_data()
     
     # Run multiple experiments with different seeds
-    seeds = [42, 123, 456, 789, 999]  # 5 different seeds for statistical robustness
+    seeds = [42]  # Start with just one seed for testing
     
     lora_results = []
     full_results = []
