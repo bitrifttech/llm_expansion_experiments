@@ -1,2 +1,35 @@
+# Python virtual environment
 .venv
-full_python/model.safetensors
+
+# Model files and checkpoints
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Model directories
+full_python/
+lora_python/
+lora_javascript/
+adapters/
+checkpoints/
+models/
+
+# Experiment outputs
+experimental_results.json
+*.log
+
+# Large datasets
+data/
+datasets/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# PyTorch cache
+.cache/
+
+# Hugging Face cache
+.cache/huggingface/
