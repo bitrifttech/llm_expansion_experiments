@@ -231,10 +231,20 @@ class LoRAContinualLearner(ContinualLearner):
         ).to(self.device)
         self.current_task = task_name
         
+        # Validation: Ensure model is properly loaded
+        if self.current_model is None:
+            raise RuntimeError(f"Failed to load LoRA adapter for task {task_name}")
+        
+        log_message(f"Successfully switched to LoRA adapter for {task_name} (device: {self.current_model.device})")
+        
     def evaluate_task(self, eval_data, task_name: str, num_samples: int = 500) -> Tuple[float, float]:
         """Evaluate specific task using its adapter"""
         self.switch_to_task(task_name)
-        return self._evaluate_model(self.current_model, eval_data, num_samples)
+        log_message(f"Evaluating {task_name} task with LoRA adapter (current_task: {self.current_task})")
+        
+        # Infer language from task name
+        language = "python" if "python" in task_name.lower() else "javascript" if "javascript" in task_name.lower() else None
+        return self._evaluate_model(self.current_model, eval_data, num_samples, language)
         
     def _train_model(self, model, data, epochs: int, batch_size: int) -> float:
         """Internal training method"""
@@ -278,7 +288,7 @@ class LoRAContinualLearner(ContinualLearner):
             
         return (time.time() - start_time) / 60
         
-    def _evaluate_model(self, model, data, num_samples: int) -> Tuple[float, float]:
+    def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Tuple[float, float]:
         """Internal evaluation method"""
         model.eval()
         bleu_scores = []
@@ -303,7 +313,7 @@ class LoRAContinualLearner(ContinualLearner):
                         return_tensors="pt", 
                         max_length=512, 
                         truncation=True
-                    ).to(self.device)
+                    ).to(model.device)  # Use model.device instead of self.device
                     
                     outputs = model.generate(
                         **inputs, 
@@ -316,6 +326,17 @@ class LoRAContinualLearner(ContinualLearner):
                     
                     pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                     
+                    # Validate generated text
+                    if not pred_text or not pred_text.strip():
+                        # Empty generation
+                        bleu_scores.append(0.0)
+                        meteor_scores.append(0.0)
+                        edit_distances.append(1.0)
+                        ast_similarities.append(0.0)
+                        complexity_scores.append(1.0)
+                        pass_scores.append(0.0)
+                        continue
+                    
                     # Calculate BLEU score
                     target_tokens = self.tokenizer.tokenize(target_text)
                     pred_tokens = self.tokenizer.tokenize(pred_text)
@@ -326,12 +347,24 @@ class LoRAContinualLearner(ContinualLearner):
                     else:
                         bleu_scores.append(0.0)
                         
-                    # Test syntactic correctness
+                    # Test syntactic correctness - use language parameter from dataset or infer
                     try:
-                        # Try to parse/compile the generated code
-                        if "python" in data[i].get("language", "").lower():
+                        # Auto-detect language if not provided
+                        detected_language = language or data[i].get("language", "").lower()
+                        
+                        if detected_language == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
+                            # Python code - try to compile
                             compile(pred_text, "<string>", "exec")
-                        pass_scores.append(1.0)
+                            pass_scores.append(1.0)
+                        elif detected_language == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
+                            # JavaScript code - basic syntax check
+                            if pred_text.strip() and '{' in pred_text and '}' in pred_text and not pred_text.strip().startswith('//'):
+                                pass_scores.append(1.0)
+                            else:
+                                pass_scores.append(0.0)
+                        else:
+                            # Unknown language - basic non-empty check
+                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
                     except:
                         pass_scores.append(0.0)
                         
@@ -393,12 +426,21 @@ class FullLayerContinualLearner(ContinualLearner):
             self.checkpoints[task_name]
         ).to(self.device)
         self.current_task = task_name
-        log_message(f"Switched to {task_name} model: Base + {task_name} Layer")
+        
+        # Validation: Ensure model is properly loaded
+        if self.current_model is None:
+            raise RuntimeError(f"Failed to load checkpoint for task {task_name}")
+            
+        log_message(f"Successfully switched to checkpoint for {task_name} (device: {self.current_model.device})")
         
     def evaluate_task(self, eval_data, task_name: str, num_samples: int = 500) -> Tuple[float, float]:
         """Evaluate specific task using its own checkpoint (task-specific layer)"""
         self.switch_to_task(task_name)
-        return self._evaluate_model(self.current_model, eval_data, num_samples)
+        log_message(f"Evaluating {task_name} task with new layer (current_task: {self.current_task})")
+        
+        # Infer language from task name
+        language = "python" if "python" in task_name.lower() else "javascript" if "javascript" in task_name.lower() else None
+        return self._evaluate_model(self.current_model, eval_data, num_samples, language)
         
     def _train_model(self, model, data, epochs: int, batch_size: int) -> float:
         """Internal training method"""
@@ -443,7 +485,7 @@ class FullLayerContinualLearner(ContinualLearner):
             
         return (time.time() - start_time) / 60
         
-    def _evaluate_model(self, model, data, num_samples: int) -> Tuple[float, float]:
+    def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Tuple[float, float]:
         """Internal evaluation method"""
         model.eval()
         bleu_scores = []
@@ -467,7 +509,7 @@ class FullLayerContinualLearner(ContinualLearner):
                         return_tensors="pt", 
                         max_length=512, 
                         truncation=True
-                    ).to(self.device)
+                    ).to(model.device)
                     
                     outputs = model.generate(
                         **inputs, 
@@ -480,6 +522,18 @@ class FullLayerContinualLearner(ContinualLearner):
                     
                     pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                     
+                    # Validate generated text
+                    if not pred_text or not pred_text.strip():
+                        # Empty generation
+                        bleu_scores.append(0.0)
+                        meteor_scores.append(0.0)
+                        edit_distances.append(1.0)
+                        ast_similarities.append(0.0)
+                        complexity_scores.append(1.0)
+                        pass_scores.append(0.0)
+                        continue
+                    
+                    # Calculate BLEU score
                     target_tokens = self.tokenizer.tokenize(target_text)
                     pred_tokens = self.tokenizer.tokenize(pred_text)
                     
@@ -489,10 +543,24 @@ class FullLayerContinualLearner(ContinualLearner):
                     else:
                         bleu_scores.append(0.0)
                         
+                    # Test syntactic correctness - use language parameter from dataset or infer
                     try:
-                        if "python" in data[i].get("language", "").lower():
+                        # Auto-detect language if not provided
+                        detected_language = language or data[i].get("language", "").lower()
+                        
+                        if detected_language == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
+                            # Python code - try to compile
                             compile(pred_text, "<string>", "exec")
-                        pass_scores.append(1.0)
+                            pass_scores.append(1.0)
+                        elif detected_language == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
+                            # JavaScript code - basic syntax check
+                            if pred_text.strip() and '{' in pred_text and '}' in pred_text and not pred_text.strip().startswith('//'):
+                                pass_scores.append(1.0)
+                            else:
+                                pass_scores.append(0.0)
+                        else:
+                            # Unknown language - basic non-empty check
+                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
                     except:
                         pass_scores.append(0.0)
                         
@@ -640,6 +708,17 @@ class ComprehensiveEvaluator:
                     
                     pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                     
+                    # Validate generated text
+                    if not pred_text or not pred_text.strip():
+                        # Empty generation
+                        bleu_scores.append(0.0)
+                        meteor_scores.append(0.0)
+                        edit_distances.append(1.0)
+                        ast_similarities.append(0.0)
+                        complexity_scores.append(1.0)
+                        pass_scores.append(0.0)
+                        continue
+                    
                     # BLEU Score
                     target_tokens = self.tokenizer.tokenize(target_text)
                     pred_tokens = self.tokenizer.tokenize(pred_text)
@@ -668,15 +747,19 @@ class ComprehensiveEvaluator:
                     
                     # Compilation/Execution Test
                     try:
-                        if language.lower() == "python":
+                        if language.lower() == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
+                            # Python code - try to compile
                             compile(pred_text, "<string>", "exec")
                             pass_scores.append(1.0)
-                        else:
-                            # For JavaScript, just check basic syntax
-                            if pred_text.strip() and '{' in pred_text and '}' in pred_text:
+                        elif language.lower() == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
+                            # JavaScript code - basic syntax check
+                            if pred_text.strip() and '{' in pred_text and '}' in pred_text and not pred_text.strip().startswith('//'):
                                 pass_scores.append(1.0)
                             else:
                                 pass_scores.append(0.0)
+                        else:
+                            # Unknown language - basic non-empty check
+                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
                     except:
                         pass_scores.append(0.0)
                         
@@ -780,6 +863,7 @@ def run_single_experiment(learner_class, model_name: str, tokenizer, python_trai
     
     # Properly load and evaluate the Python adapter
     learner.switch_to_task("python")
+    log_message(f"Current model for Python evaluation: {type(learner.current_model).__name__}")
     python_after_python = evaluator.evaluate_comprehensive(learner.current_model, python_val, "python", 50)
     
     # For JavaScript, use base model since no JS-specific component exists yet
@@ -800,10 +884,12 @@ def run_single_experiment(learner_class, model_name: str, tokenizer, python_trai
     
     # Evaluate JavaScript with its own component
     learner.switch_to_task("javascript")
+    log_message(f"Current model for JavaScript evaluation: {type(learner.current_model).__name__}")
     js_after_js = evaluator.evaluate_comprehensive(learner.current_model, js_val, "javascript", 50)
     
     # Re-evaluate Python to measure forgetting
     learner.switch_to_task("python") 
+    log_message(f"Current model for Python re-evaluation: {type(learner.current_model).__name__}")
     python_after_js = evaluator.evaluate_comprehensive(learner.current_model, python_val, "python", 50)
     
     log_message(f"After JavaScript training:")
