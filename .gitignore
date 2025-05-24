@@ -17,8 +17,13 @@ adapters/
 checkpoints/
 models/
 
+# Hybrid experiment results
+hybrid_lora_full_layer_experiment/experiment_1_results/
+hybrid_lora_full_layer_experiment/experiment_2_results/
+
 # Experiment outputs
 experimental_results.json
+hybrid_experiment_results.json
 *.log
 
 # Large datasets
