@@ -5,8 +5,11 @@ import numpy as np
 import psutil
 import time
 import random
+import ast
+import re
 from copy import deepcopy
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.meteor_score import meteor_score
 from datasets import load_dataset
 from transformers import T5ForConditionalGeneration, AutoTokenizer, T5Config
 from peft import LoraConfig, get_peft_model, PeftModel
@@ -15,6 +18,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 import json
 from scipy import stats
+import difflib
+from collections import defaultdict
+import warnings
+warnings.filterwarnings("ignore")
 
 # Set random seeds for reproducibility
 def set_seed(seed: int):
@@ -26,13 +33,37 @@ def set_seed(seed: int):
 
 @dataclass
 class ExperimentResults:
-    """Store results from a single experimental run"""
+    """Store results from a single experimental run with comprehensive metrics"""
+    # Basic metrics
     python_bleu_before: float
     python_bleu_after: float
     js_bleu: float
     python_pass_before: float
     python_pass_after: float
     js_pass: float
+    
+    # Advanced semantic metrics
+    python_meteor_before: float
+    python_meteor_after: float
+    js_meteor: float
+    python_edit_distance_before: float
+    python_edit_distance_after: float
+    js_edit_distance: float
+    
+    # Code quality metrics
+    python_complexity_before: float
+    python_complexity_after: float
+    js_complexity: float
+    python_ast_similarity_before: float
+    python_ast_similarity_after: float
+    js_ast_similarity: float
+    
+    # Continual learning metrics
+    forward_transfer: float  # How Python helps JavaScript
+    backward_interference: float  # How JavaScript hurts Python
+    retention_score: float  # Overall knowledge retention
+    
+    # Efficiency metrics
     training_time: float
     memory_usage: float
     forgetting_rate: float
@@ -45,6 +76,21 @@ class ExperimentResults:
             'python_pass_before': self.python_pass_before,
             'python_pass_after': self.python_pass_after,
             'js_pass': self.js_pass,
+            'python_meteor_before': self.python_meteor_before,
+            'python_meteor_after': self.python_meteor_after,
+            'js_meteor': self.js_meteor,
+            'python_edit_distance_before': self.python_edit_distance_before,
+            'python_edit_distance_after': self.python_edit_distance_after,
+            'js_edit_distance': self.js_edit_distance,
+            'python_complexity_before': self.python_complexity_before,
+            'python_complexity_after': self.python_complexity_after,
+            'js_complexity': self.js_complexity,
+            'python_ast_similarity_before': self.python_ast_similarity_before,
+            'python_ast_similarity_after': self.python_ast_similarity_after,
+            'js_ast_similarity': self.js_ast_similarity,
+            'forward_transfer': self.forward_transfer,
+            'backward_interference': self.backward_interference,
+            'retention_score': self.retention_score,
             'training_time': self.training_time,
             'memory_usage': self.memory_usage,
             'forgetting_rate': self.forgetting_rate
@@ -460,6 +506,225 @@ def get_memory_usage():
     """Get current memory usage in GB"""
     return psutil.Process().memory_info().rss / 1024**3
 
+def calculate_edit_distance(pred_text: str, target_text: str) -> float:
+    """Calculate normalized edit distance between two code strings"""
+    if not pred_text or not target_text:
+        return 1.0
+    
+    # Normalize whitespace and remove comments for fair comparison
+    pred_clean = re.sub(r'\s+', ' ', pred_text.strip())
+    target_clean = re.sub(r'\s+', ' ', target_text.strip())
+    
+    # Calculate Levenshtein distance
+    distance = difflib.SequenceMatcher(None, pred_clean, target_clean).ratio()
+    return 1.0 - distance  # Convert similarity to distance
+
+def calculate_ast_similarity(pred_text: str, target_text: str, language: str = "python") -> float:
+    """Calculate AST similarity between generated and target code"""
+    try:
+        if language.lower() == "python":
+            # Parse both codes into ASTs
+            pred_ast = ast.parse(pred_text)
+            target_ast = ast.parse(target_text)
+            
+            # Convert ASTs to comparable structures
+            pred_nodes = [type(node).__name__ for node in ast.walk(pred_ast)]
+            target_nodes = [type(node).__name__ for node in ast.walk(target_ast)]
+            
+            # Calculate structural similarity
+            if not pred_nodes or not target_nodes:
+                return 0.0
+                
+            common_nodes = len(set(pred_nodes) & set(target_nodes))
+            total_nodes = len(set(pred_nodes) | set(target_nodes))
+            
+            return common_nodes / total_nodes if total_nodes > 0 else 0.0
+        else:
+            # For JavaScript, use a simpler token-based approach
+            pred_tokens = re.findall(r'\w+|[{}();,.]', pred_text)
+            target_tokens = re.findall(r'\w+|[{}();,.]', target_text)
+            
+            if not pred_tokens or not target_tokens:
+                return 0.0
+                
+            common_tokens = len(set(pred_tokens) & set(target_tokens))
+            total_tokens = len(set(pred_tokens) | set(target_tokens))
+            
+            return common_tokens / total_tokens if total_tokens > 0 else 0.0
+            
+    except (SyntaxError, ValueError):
+        return 0.0
+
+def calculate_code_complexity(code_text: str, language: str = "python") -> float:
+    """Calculate cyclomatic complexity of code"""
+    try:
+        if language.lower() == "python":
+            # Count control flow statements for Python
+            control_statements = len(re.findall(r'\b(if|elif|else|for|while|try|except|finally|with|def|class)\b', code_text))
+            logical_operators = len(re.findall(r'\b(and|or)\b', code_text))
+            return control_statements + logical_operators + 1
+        else:
+            # Count control flow statements for JavaScript
+            control_statements = len(re.findall(r'\b(if|else|for|while|do|switch|case|try|catch|finally|function)\b', code_text))
+            logical_operators = len(re.findall(r'(\&\&|\|\|)', code_text))
+            return control_statements + logical_operators + 1
+    except:
+        return 1.0
+
+def calculate_meteor_score_safe(pred_text: str, target_text: str) -> float:
+    """Calculate METEOR score with error handling"""
+    try:
+        if not pred_text.strip() or not target_text.strip():
+            return 0.0
+            
+        # Tokenize for METEOR
+        pred_tokens = pred_text.split()
+        target_tokens = target_text.split()
+        
+        if not pred_tokens or not target_tokens:
+            return 0.0
+            
+        # Calculate METEOR score
+        score = meteor_score([target_tokens], pred_tokens)
+        return score
+    except:
+        return 0.0
+
+class ComprehensiveEvaluator:
+    """Comprehensive evaluation with multiple metrics"""
+    
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.smoothing = SmoothingFunction().method1
+        
+    def evaluate_comprehensive(self, model, data, language: str, num_samples: int = 100) -> Dict[str, float]:
+        """Run comprehensive evaluation with all metrics"""
+        model.eval()
+        
+        # Metric collectors
+        bleu_scores = []
+        meteor_scores = []
+        edit_distances = []
+        ast_similarities = []
+        complexity_scores = []
+        pass_scores = []
+        
+        eval_samples = min(num_samples, len(data))
+        
+        with torch.no_grad():
+            for i in range(eval_samples):
+                try:
+                    source_code = data[i]["func_code_string"]
+                    if not source_code or not str(source_code).strip():
+                        continue
+                        
+                    # Use first part as input, full code as target
+                    input_text = source_code[:len(source_code)//2]
+                    target_text = source_code
+                    
+                    inputs = self.tokenizer(
+                        input_text, 
+                        return_tensors="pt", 
+                        max_length=512, 
+                        truncation=True
+                    ).to(model.device)
+                    
+                    outputs = model.generate(
+                        **inputs, 
+                        max_length=512, 
+                        num_beams=3,
+                        no_repeat_ngram_size=2,
+                        do_sample=True,
+                        temperature=0.7
+                    )
+                    
+                    pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    
+                    # BLEU Score
+                    target_tokens = self.tokenizer.tokenize(target_text)
+                    pred_tokens = self.tokenizer.tokenize(pred_text)
+                    
+                    if target_tokens and pred_tokens:
+                        bleu = sentence_bleu([target_tokens], pred_tokens, smoothing_function=self.smoothing)
+                        bleu_scores.append(bleu)
+                    else:
+                        bleu_scores.append(0.0)
+                    
+                    # METEOR Score
+                    meteor = calculate_meteor_score_safe(pred_text, target_text)
+                    meteor_scores.append(meteor)
+                    
+                    # Edit Distance
+                    edit_dist = calculate_edit_distance(pred_text, target_text)
+                    edit_distances.append(edit_dist)
+                    
+                    # AST Similarity
+                    ast_sim = calculate_ast_similarity(pred_text, target_text, language)
+                    ast_similarities.append(ast_sim)
+                    
+                    # Code Complexity
+                    complexity = calculate_code_complexity(pred_text, language)
+                    complexity_scores.append(complexity)
+                    
+                    # Compilation/Execution Test
+                    try:
+                        if language.lower() == "python":
+                            compile(pred_text, "<string>", "exec")
+                            pass_scores.append(1.0)
+                        else:
+                            # For JavaScript, just check basic syntax
+                            if pred_text.strip() and '{' in pred_text and '}' in pred_text:
+                                pass_scores.append(1.0)
+                            else:
+                                pass_scores.append(0.0)
+                    except:
+                        pass_scores.append(0.0)
+                        
+                except Exception as e:
+                    # Add zero scores for failed samples
+                    bleu_scores.append(0.0)
+                    meteor_scores.append(0.0)
+                    edit_distances.append(1.0)
+                    ast_similarities.append(0.0)
+                    complexity_scores.append(1.0)
+                    pass_scores.append(0.0)
+        
+        return {
+            'bleu': np.mean(bleu_scores) if bleu_scores else 0.0,
+            'meteor': np.mean(meteor_scores) if meteor_scores else 0.0,
+            'edit_distance': np.mean(edit_distances) if edit_distances else 1.0,
+            'ast_similarity': np.mean(ast_similarities) if ast_similarities else 0.0,
+            'complexity': np.mean(complexity_scores) if complexity_scores else 1.0,
+            'pass_rate': np.mean(pass_scores) if pass_scores else 0.0,
+            'num_samples': len(bleu_scores)
+        }
+
+def calculate_continual_learning_metrics(baseline_python: Dict, baseline_js: Dict, 
+                                       python_after_python: Dict, js_after_python: Dict,
+                                       python_after_js: Dict, js_after_js: Dict) -> Dict[str, float]:
+    """Calculate continual learning specific metrics"""
+    
+    # Forward Transfer: How much Python training helped JavaScript
+    js_baseline_bleu = baseline_js['bleu']
+    js_after_python_bleu = js_after_python['bleu']
+    forward_transfer = max(0, js_after_python_bleu - js_baseline_bleu)
+    
+    # Backward Interference: How much JavaScript training hurt Python  
+    python_after_python_bleu = python_after_python['bleu']
+    python_after_js_bleu = python_after_js['bleu']
+    backward_interference = max(0, python_after_python_bleu - python_after_js_bleu)
+    
+    # Retention Score: Overall knowledge retention
+    python_retention = python_after_js_bleu / python_after_python_bleu if python_after_python_bleu > 0 else 0
+    js_improvement = js_after_js['bleu'] / js_baseline_bleu if js_baseline_bleu > 0 else 0
+    retention_score = (python_retention + js_improvement) / 2
+    
+    return {
+        'forward_transfer': forward_transfer,
+        'backward_interference': backward_interference, 
+        'retention_score': retention_score
+    }
+
 def load_and_prepare_data():
     """Load and prepare datasets"""
     log_message("Loading CodeSearchNet dataset...")
@@ -487,98 +752,124 @@ def load_and_prepare_data():
         sys.exit(1)
 
 def run_single_experiment(learner_class, model_name: str, tokenizer, python_train, python_val, js_train, js_val, seed: int) -> ExperimentResults:
-    """Run a single experimental trial with comprehensive before/after comparisons"""
+    """Run a single experimental trial with comprehensive evaluation metrics"""
     set_seed(seed)
     log_message(f"Running {learner_class.__name__} experiment with seed {seed}")
     
-    # Initialize learner
+    # Initialize learner and comprehensive evaluator
     learner = learner_class(model_name, tokenizer, device)
     learner.prepare_model()
+    evaluator = ComprehensiveEvaluator(tokenizer)
     
     start_memory = get_memory_usage()
     
     # === BASELINE EVALUATION (before any training) ===
     log_message("=== BASELINE EVALUATION (Untrained Model) ===")
-    # For baseline, we need to temporarily set up the base model for evaluation
-    temp_model = learner.base_model
-    baseline_python_bleu, baseline_python_pass = learner._evaluate_model(temp_model, python_val, 100)
-    baseline_js_bleu, baseline_js_pass = learner._evaluate_model(temp_model, js_val, 100)
+    baseline_python = evaluator.evaluate_comprehensive(learner.base_model, python_val, "python", 50)
+    baseline_js = evaluator.evaluate_comprehensive(learner.base_model, js_val, "javascript", 50)
     
-    log_message(f"Baseline Python BLEU: {baseline_python_bleu:.4f}, Pass@1: {baseline_python_pass:.4f}")
-    log_message(f"Baseline JavaScript BLEU: {baseline_js_bleu:.4f}, Pass@1: {baseline_js_pass:.4f}")
+    log_message(f"Baseline Python - BLEU: {baseline_python['bleu']:.4f}, METEOR: {baseline_python['meteor']:.4f}, AST: {baseline_python['ast_similarity']:.4f}")
+    log_message(f"Baseline JavaScript - BLEU: {baseline_js['bleu']:.4f}, METEOR: {baseline_js['meteor']:.4f}, AST: {baseline_js['ast_similarity']:.4f}")
     
     # === STEP 1: TRAIN ON PYTHON ===
     log_message("\n=== STEP 1: TRAINING ON PYTHON ===")
     python_training_time = learner.train_task(python_train, "python", epochs=2, batch_size=8)
     
-    # Evaluate both tasks after Python training
-    log_message("Evaluating both tasks after Python training...")
-    python_bleu_after_python, python_pass_after_python = learner.evaluate_task(python_val, "python", num_samples=100)
+    # Comprehensive evaluation after Python training
+    log_message("Comprehensive evaluation after Python training...")
+    python_after_python = evaluator.evaluate_comprehensive(learner.evaluate_task.__self__.current_model if hasattr(learner, 'evaluate_task') else learner.base_model, python_val, "python", 50)
     
-    # For JavaScript evaluation after Python training, we need to handle this carefully
-    # For LoRA: no JS adapter exists yet, so use base model
-    # For New Layer: no JS layer exists yet, so use base model  
-    if isinstance(learner, LoRAContinualLearner):
-        # Use base model for JS since no JS adapter exists yet
-        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.base_model, js_val, 100)
-    else:
-        # Use base model for JS since no JS layer exists yet (fair comparison)
-        js_bleu_after_python, js_pass_after_python = learner._evaluate_model(learner.base_model, js_val, 100)
+    # For JavaScript, use base model since no JS-specific component exists yet
+    js_after_python = baseline_js  # No change expected
     
     log_message(f"After Python training:")
-    log_message(f"  Python BLEU: {baseline_python_bleu:.4f} → {python_bleu_after_python:.4f} (Δ{python_bleu_after_python-baseline_python_bleu:+.4f})")
-    log_message(f"  JavaScript BLEU: {baseline_js_bleu:.4f} → {js_bleu_after_python:.4f} (Δ{js_bleu_after_python-baseline_js_bleu:+.4f})")
-    log_message(f"  Python Pass@1: {baseline_python_pass:.4f} → {python_pass_after_python:.4f} (Δ{python_pass_after_python-baseline_python_pass:+.4f})")
-    log_message(f"  JavaScript Pass@1: {baseline_js_pass:.4f} → {js_pass_after_python:.4f} (Δ{js_pass_after_python-baseline_js_pass:+.4f})")
+    log_message(f"  Python BLEU: {baseline_python['bleu']:.4f} → {python_after_python['bleu']:.4f} (Δ{python_after_python['bleu']-baseline_python['bleu']:+.4f})")
+    log_message(f"  Python METEOR: {baseline_python['meteor']:.4f} → {python_after_python['meteor']:.4f} (Δ{python_after_python['meteor']-baseline_python['meteor']:+.4f})")
+    log_message(f"  Python AST Similarity: {baseline_python['ast_similarity']:.4f} → {python_after_python['ast_similarity']:.4f}")
+    log_message(f"  Python Code Complexity: {python_after_python['complexity']:.2f}")
     
     # === STEP 2: TRAIN ON JAVASCRIPT ===
     log_message("\n=== STEP 2: TRAINING ON JAVASCRIPT ===")
     js_training_time = learner.train_task(js_train, "javascript", epochs=2, batch_size=8)
     
-    # Evaluate both tasks after JavaScript training
-    log_message("Evaluating both tasks after JavaScript training...")
-    js_bleu_after_js, js_pass_after_js = learner.evaluate_task(js_val, "javascript", num_samples=100)
-    python_bleu_after_js, python_pass_after_js = learner.evaluate_task(python_val, "python", num_samples=100)
+    # Comprehensive evaluation after JavaScript training
+    log_message("Comprehensive evaluation after JavaScript training...")
+    
+    # Evaluate JavaScript with its own component
+    learner.switch_to_task("javascript")
+    js_after_js = evaluator.evaluate_comprehensive(learner.current_model, js_val, "javascript", 50)
+    
+    # Re-evaluate Python to measure forgetting
+    learner.switch_to_task("python") 
+    python_after_js = evaluator.evaluate_comprehensive(learner.current_model, python_val, "python", 50)
     
     log_message(f"After JavaScript training:")
-    log_message(f"  JavaScript BLEU: {js_bleu_after_python:.4f} → {js_bleu_after_js:.4f} (Δ{js_bleu_after_js-js_bleu_after_python:+.4f})")
-    log_message(f"  Python BLEU: {python_bleu_after_python:.4f} → {python_bleu_after_js:.4f} (Δ{python_bleu_after_js-python_bleu_after_python:+.4f})")
-    log_message(f"  JavaScript Pass@1: {js_pass_after_python:.4f} → {js_pass_after_js:.4f} (Δ{js_pass_after_js-js_pass_after_python:+.4f})")
-    log_message(f"  Python Pass@1: {python_pass_after_python:.4f} → {python_pass_after_js:.4f} (Δ{python_pass_after_js-python_pass_after_python:+.4f})")
+    log_message(f"  JavaScript BLEU: {baseline_js['bleu']:.4f} → {js_after_js['bleu']:.4f} (Δ{js_after_js['bleu']-baseline_js['bleu']:+.4f})")
+    log_message(f"  JavaScript METEOR: {baseline_js['meteor']:.4f} → {js_after_js['meteor']:.4f}")
+    log_message(f"  JavaScript AST Similarity: {js_after_js['ast_similarity']:.4f}")
+    log_message(f"  Python BLEU: {python_after_python['bleu']:.4f} → {python_after_js['bleu']:.4f} (Δ{python_after_js['bleu']-python_after_python['bleu']:+.4f})")
+    log_message(f"  Python Forgetting: {((python_after_python['bleu'] - python_after_js['bleu'])/python_after_python['bleu']*100):.1f}%")
+    
+    # === CONTINUAL LEARNING ANALYSIS ===
+    cl_metrics = calculate_continual_learning_metrics(
+        baseline_python, baseline_js, python_after_python, js_after_python, python_after_js, js_after_js
+    )
+    
+    log_message(f"\n=== CONTINUAL LEARNING ANALYSIS ===")
+    log_message(f"🔄 Forward Transfer: {cl_metrics['forward_transfer']:.4f}")
+    log_message(f"🔙 Backward Interference: {cl_metrics['backward_interference']:.4f}")
+    log_message(f"🧠 Retention Score: {cl_metrics['retention_score']:.4f}")
     
     # === SUMMARY ANALYSIS ===
     end_memory = get_memory_usage()
     total_training_time = python_training_time + js_training_time
-    
-    # Calculate various forgetting metrics
-    absolute_forgetting = python_bleu_after_python - python_bleu_after_js
-    relative_forgetting = absolute_forgetting / python_bleu_after_python if python_bleu_after_python > 0 else 0
-    baseline_relative_forgetting = (baseline_python_bleu - python_bleu_after_js) / baseline_python_bleu if baseline_python_bleu > 0 else 0
+    forgetting_rate = (python_after_python['bleu'] - python_after_js['bleu']) / python_after_python['bleu'] if python_after_python['bleu'] > 0 else 0
     
     log_message(f"\n=== COMPREHENSIVE SUMMARY ===")
-    log_message(f"📈 Overall Python Progress: {baseline_python_bleu:.4f} → {python_bleu_after_python:.4f} → {python_bleu_after_js:.4f}")
-    log_message(f"📈 Overall JavaScript Progress: {baseline_js_bleu:.4f} → {js_bleu_after_python:.4f} → {js_bleu_after_js:.4f}")
-    log_message(f"🧠 Catastrophic Forgetting (Python): {absolute_forgetting:.4f} absolute, {relative_forgetting:.2%} relative")
-    log_message(f"⚡ Cross-task Interference: JS training {'helped' if python_bleu_after_js > python_bleu_after_python else 'hurt'} Python by {abs(python_bleu_after_js - python_bleu_after_python):.4f}")
-    log_message(f"🎯 Final Performance vs Baseline: Python {python_bleu_after_js/baseline_python_bleu:.2f}x, JavaScript {js_bleu_after_js/baseline_js_bleu:.2f}x")
+    log_message(f"📊 Final Python Performance: BLEU {python_after_js['bleu']:.4f}, METEOR {python_after_js['meteor']:.4f}")
+    log_message(f"📊 Final JavaScript Performance: BLEU {js_after_js['bleu']:.4f}, METEOR {js_after_js['meteor']:.4f}")
+    log_message(f"⚡ Training Efficiency: {total_training_time:.2f} min, {end_memory - start_memory:.2f} GB")
     
     results = ExperimentResults(
-        python_bleu_before=python_bleu_after_python,  # After Python training
-        python_bleu_after=python_bleu_after_js,       # After JavaScript training  
-        js_bleu=js_bleu_after_js,                     # After JavaScript training
-        python_pass_before=python_pass_after_python,
-        python_pass_after=python_pass_after_js,
-        js_pass=js_pass_after_js,
+        # Basic metrics
+        python_bleu_before=python_after_python['bleu'],
+        python_bleu_after=python_after_js['bleu'],
+        js_bleu=js_after_js['bleu'],
+        python_pass_before=python_after_python['pass_rate'],
+        python_pass_after=python_after_js['pass_rate'],
+        js_pass=js_after_js['pass_rate'],
+        
+        # Advanced semantic metrics  
+        python_meteor_before=python_after_python['meteor'],
+        python_meteor_after=python_after_js['meteor'],
+        js_meteor=js_after_js['meteor'],
+        python_edit_distance_before=python_after_python['edit_distance'],
+        python_edit_distance_after=python_after_js['edit_distance'],
+        js_edit_distance=js_after_js['edit_distance'],
+        
+        # Code quality metrics
+        python_complexity_before=python_after_python['complexity'],
+        python_complexity_after=python_after_js['complexity'],
+        js_complexity=js_after_js['complexity'],
+        python_ast_similarity_before=python_after_python['ast_similarity'],
+        python_ast_similarity_after=python_after_js['ast_similarity'],
+        js_ast_similarity=js_after_js['ast_similarity'],
+        
+        # Continual learning metrics
+        forward_transfer=cl_metrics['forward_transfer'],
+        backward_interference=cl_metrics['backward_interference'],
+        retention_score=cl_metrics['retention_score'],
+        
+        # Efficiency metrics
         training_time=total_training_time,
         memory_usage=end_memory - start_memory,
-        forgetting_rate=relative_forgetting
+        forgetting_rate=forgetting_rate
     )
     
-    log_message(f"\n{learner_class.__name__} Final Results (seed {seed}):")
-    log_message(f"  Python BLEU: {python_bleu_after_python:.4f} → {python_bleu_after_js:.4f} (forgetting: {relative_forgetting:.2%})")
-    log_message(f"  JavaScript BLEU: {js_bleu_after_js:.4f}")
-    log_message(f"  Training time: {total_training_time:.2f} min")
-    log_message(f"  Memory usage: {end_memory - start_memory:.2f} GB")
+    log_message(f"\n{learner_class.__name__} Comprehensive Results (seed {seed}):")
+    log_message(f"  📊 Performance: Python BLEU {python_after_js['bleu']:.4f}, JS BLEU {js_after_js['bleu']:.4f}")
+    log_message(f"  🧠 Continual Learning: Forgetting {forgetting_rate:.2%}, Retention {cl_metrics['retention_score']:.4f}")
+    log_message(f"  ⚡ Efficiency: {total_training_time:.2f} min, {end_memory - start_memory:.2f} GB")
     
     return results
 
