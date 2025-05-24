@@ -69,6 +69,36 @@ else:
 
 log_message(f"Device: {device}, System Memory: {psutil.virtual_memory().total / 1024**3:.2f} GB")
 
+def freeze_base_model(model):
+    """Freeze all base model parameters"""
+    for param in model.parameters():
+        param.requires_grad = False
+    log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
+
+def add_trainable_transformer_layer(model):
+    """Add a new trainable transformer layer to the encoder"""
+    from copy import deepcopy
+    import torch.nn as nn
+    
+    # Create a new layer based on the last encoder layer
+    new_layer = deepcopy(model.encoder.block[-1])
+    
+    # Add it to the encoder
+    model.encoder.block.append(new_layer)
+    
+    # Update config
+    model.config.num_layers = len(model.encoder.block)
+    
+    # Initialize new layer parameters with small random values
+    for param in new_layer.parameters():
+        param.data = param.data * 0.01
+        param.requires_grad = True  # Ensure new layer is trainable
+    
+    trainable_params = sum(p.numel() for p in new_layer.parameters() if p.requires_grad)
+    log_message(f"Added trainable transformer layer with {trainable_params:,} parameters")
+    
+    return model
+
 class ContinualLearner:
     """Base class for continual learning approaches"""
     
@@ -266,24 +296,46 @@ class LoRAContinualLearner(ContinualLearner):
         return np.mean(bleu_scores) if bleu_scores else 0.0, np.mean(pass_scores) if pass_scores else 0.0
 
 class FullLayerContinualLearner(ContinualLearner):
-    """Full layer training with task-specific checkpoints"""
+    """Full layer training with frozen base weights and task-specific new layers"""
     
     def __init__(self, model_name: str, tokenizer, device: str):
         super().__init__(model_name, tokenizer, device)
         self.checkpoints = {}
         self.current_task = None
+        self.task_layers = {}  # Track which layers belong to which tasks
+        
+    def prepare_model(self) -> None:
+        """Initialize the base model and freeze its weights"""
+        super().prepare_model()
+        # Freeze all base model parameters
+        freeze_base_model(self.base_model)
+        log_message(f"Base model prepared with frozen weights")
         
     def train_task(self, train_data, task_name: str, epochs: int = 5, batch_size: int = 16) -> float:
-        """Train full model for specific task"""
-        log_message(f"Training full model for {task_name}...")
+        """Train new transformer layer for specific task"""
+        log_message(f"Training new transformer layer for {task_name}...")
         
-        # Start with base model
-        model = deepcopy(self.base_model)
+        # Start with current model state (includes previously added layers)
+        if self.current_model is not None:
+            model = deepcopy(self.current_model)
+        else:
+            model = deepcopy(self.base_model)
+            
+        # Add and configure new trainable layer for this task
+        model = add_trainable_transformer_layer(model)
         
-        # Train all parameters
+        # Store which layer index belongs to this task
+        self.task_layers[task_name] = len(model.encoder.block) - 1
+        
+        # Verify only new layer is trainable
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        log_message(f"Training {trainable_params:,} / {total_params:,} parameters ({100*trainable_params/total_params:.2f}%)")
+        
+        # Train only the new layer
         training_time = self._train_model(model, train_data, epochs, batch_size)
         
-        # Update current model to the trained one
+        # Update current model to include the new trained layer
         self.current_model = model
         self.current_task = task_name
         
@@ -294,6 +346,7 @@ class FullLayerContinualLearner(ContinualLearner):
         self.checkpoints[task_name] = checkpoint_path
         
         log_message(f"Checkpoint for {task_name} saved to {checkpoint_path}")
+        log_message(f"Task {task_name} uses transformer layer {self.task_layers[task_name]}")
         return training_time
         
     def switch_to_task(self, task_name: str) -> None:
@@ -312,9 +365,12 @@ class FullLayerContinualLearner(ContinualLearner):
         return self._evaluate_model(self.current_model, eval_data, num_samples)
         
     def _train_model(self, model, data, epochs: int, batch_size: int) -> float:
-        """Internal training method (same as LoRA but all params trainable)"""
+        """Internal training method - only train new layers"""
         start_time = time.time()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+        
+        # Only optimize trainable parameters (new layers)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable_params, lr=5e-4, weight_decay=0.01)  # Match LoRA learning rate
         model.train()
         
         for epoch in range(epochs):
@@ -340,7 +396,7 @@ class FullLayerContinualLearner(ContinualLearner):
                 loss = outputs.loss
                 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 
@@ -352,7 +408,7 @@ class FullLayerContinualLearner(ContinualLearner):
         return (time.time() - start_time) / 60
         
     def _evaluate_model(self, model, data, num_samples: int) -> Tuple[float, float]:
-        """Internal evaluation method (same as LoRA)"""
+        """Internal evaluation method"""
         model.eval()
         bleu_scores = []
         pass_scores = []
@@ -634,8 +690,10 @@ def run_statistical_analysis(lora_results: List[ExperimentResults], full_results
 
 def main():
     """Main experimental function"""
-    log_message("Starting LoRA vs Full Layer Training Comparison")
-    log_message("This is a comprehensive rewrite with proper implementation")
+    log_message("Starting LoRA vs New Layer Training Comparison")
+    log_message("Both approaches use FROZEN base weights + task-specific trainable components")
+    log_message("LoRA: Adds small adapter matrices (~0.1% parameters)")
+    log_message("New Layer: Adds full transformer layers (~1-2% parameters)")
     
     # Initialize tokenizer
     model_name = "Salesforce/codet5-small"
@@ -671,7 +729,7 @@ def main():
             log_message(f"LoRA experiment failed with seed {seed}: {e}", level="ERROR")
             continue
             
-        # Full layer experiment
+        # New Layer experiment (renamed from Full Layer)
         try:
             full_result = run_single_experiment(
                 FullLayerContinualLearner, model_name, tokenizer,
@@ -679,7 +737,7 @@ def main():
             )
             full_results.append(full_result)
         except Exception as e:
-            log_message(f"Full layer experiment failed with seed {seed}: {e}", level="ERROR")
+            log_message(f"New Layer experiment failed with seed {seed}: {e}", level="ERROR")
             continue
     
     # Statistical analysis
