@@ -777,7 +777,10 @@ def run_single_experiment(learner_class, model_name: str, tokenizer, python_trai
     
     # Comprehensive evaluation after Python training
     log_message("Comprehensive evaluation after Python training...")
-    python_after_python = evaluator.evaluate_comprehensive(learner.evaluate_task.__self__.current_model if hasattr(learner, 'evaluate_task') else learner.base_model, python_val, "python", 50)
+    
+    # Properly load and evaluate the Python adapter
+    learner.switch_to_task("python")
+    python_after_python = evaluator.evaluate_comprehensive(learner.current_model, python_val, "python", 50)
     
     # For JavaScript, use base model since no JS-specific component exists yet
     js_after_python = baseline_js  # No change expected
