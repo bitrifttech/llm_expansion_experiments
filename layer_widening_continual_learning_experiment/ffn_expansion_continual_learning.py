@@ -497,22 +497,22 @@ def load_and_prepare_data():
     python_dataset = load_dataset("code_search_net", "python", split="train")
     python_data = []
     for item in python_dataset:
-        if item['func_name'] and item['docstring'] and item['code']:
+        if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
             python_data.append({
                 'func_name': item['func_name'],
-                'docstring': item['docstring'],
-                'code': item['code']
+                'docstring': item['func_documentation_string'],
+                'code': item['func_code_string']
             })
     
     # Load JavaScript data
     js_dataset = load_dataset("code_search_net", "javascript", split="train")
     js_data = []
     for item in js_dataset:
-        if item['func_name'] and item['docstring'] and item['code']:
+        if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
             js_data.append({
                 'func_name': item['func_name'],
-                'docstring': item['docstring'],
-                'code': item['code']
+                'docstring': item['func_documentation_string'],
+                'code': item['func_code_string']
             })
     
     # Split into train/val
