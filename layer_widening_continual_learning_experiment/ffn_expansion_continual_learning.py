@@ -171,9 +171,20 @@ class ExpandedFFN(torch.nn.Module):
         self.expansion_down = self.expansion_down.to(device)
         self.expansion_dropout = self.expansion_dropout.to(device)
         
-        # Initialize expansion weights with small values to start near identity
-        torch.nn.init.normal_(self.expansion_up.weight, std=0.01)
-        torch.nn.init.normal_(self.expansion_down.weight, std=0.01)
+        # Initialize expansion weights to start near zero for stability
+        # Use Xavier/Glorot initialization scaled down significantly
+        with torch.no_grad():
+            # Initialize up projection with very small values
+            torch.nn.init.xavier_uniform_(self.expansion_up.weight)
+            self.expansion_up.weight.data *= 0.001  # Scale down significantly
+            
+            # Initialize down projection to near zero
+            torch.nn.init.zeros_(self.expansion_down.weight)
+            
+        # Learnable scaling factor that starts very small
+        self.expansion_scale = torch.nn.Parameter(
+            torch.tensor(0.001, dtype=self.dtype, device=device)
+        )
         
         log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
         
@@ -181,7 +192,7 @@ class ExpandedFFN(torch.nn.Module):
         # Original FFN output (frozen)
         original_out = self.original_ffn(x)
         
-        # Expansion path (trainable) - start small to avoid disrupting training
+        # Expansion path (trainable) - start very small to avoid disrupting training
         expanded = self.expansion_up(x)
         expanded = self.expansion_act(expanded)
         expanded = self.expansion_dropout(expanded)
@@ -190,8 +201,19 @@ class ExpandedFFN(torch.nn.Module):
         # Ensure expansion output matches original output dtype
         expanded = expanded.to(original_out.dtype)
         
-        # Combine with residual connection (scale down expansion initially)
-        return original_out + 0.1 * expanded
+        # Apply learnable scaling and clamp to prevent extreme values
+        scaled_expansion = self.expansion_scale * expanded
+        scaled_expansion = torch.clamp(scaled_expansion, -10.0, 10.0)  # Prevent extreme values
+        
+        # Combine with residual connection
+        result = original_out + scaled_expansion
+        
+        # Additional safety check for NaN/Inf
+        if torch.isnan(result).any() or torch.isinf(result).any():
+            log_message("Warning: NaN/Inf detected in ExpandedFFN output, returning original output")
+            return original_out
+            
+        return result
 
 def expand_model_ffn(model, expansion_size: int = 512):
     """Expand all FFN layers in the model with additional trainable parameters"""
@@ -294,6 +316,7 @@ class FFNExpansionContinualLearner:
                 expansion_state[name] = {
                     'expansion_up.weight': module.expansion_up.weight.data,
                     'expansion_down.weight': module.expansion_down.weight.data,
+                    'expansion_scale': module.expansion_scale.data,
                     'expansion_size': module.expansion_size
                 }
         
@@ -333,6 +356,8 @@ class FFNExpansionContinualLearner:
             if isinstance(module, ExpandedFFN) and name in expansion_state:
                 module.expansion_up.weight.data = expansion_state[name]['expansion_up.weight']
                 module.expansion_down.weight.data = expansion_state[name]['expansion_down.weight']
+                if 'expansion_scale' in expansion_state[name]:
+                    module.expansion_scale.data = expansion_state[name]['expansion_scale']
         
         return expanded_model
         
@@ -367,14 +392,20 @@ class FFNExpansionContinualLearner:
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         log_message(f"Training {len(trainable_params)} parameter groups, {sum(p.numel() for p in trainable_params):,} total parameters")
         
-        # Use more conservative learning rate for expansion training
-        optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01, eps=1e-8)
+        # Use very conservative learning rate for expansion training to prevent instability
+        optimizer = torch.optim.AdamW(trainable_params, lr=5e-5, weight_decay=0.01, eps=1e-8)
+        
+        # Learning rate scheduler for gradual warmup
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, total_iters=100
+        )
         
         model.train()
         
         for epoch in range(epochs):
             epoch_loss = 0
             num_batches = 0
+            valid_batches = 0
             
             # Create batches
             for i in range(0, len(data), batch_size):
@@ -402,47 +433,70 @@ class FFNExpansionContinualLearner:
                 ).to(self.device)
                 
                 # Forward pass
-                outputs = model(
-                    input_ids=input_encodings.input_ids,
-                    attention_mask=input_encodings.attention_mask,
-                    labels=target_encodings.input_ids
-                )
-                
-                loss = outputs.loss
-                
-                # Check for NaN loss
-                if torch.isnan(loss) or torch.isinf(loss):
-                    log_message(f"Warning: NaN/Inf loss detected, skipping batch {i//batch_size}")
+                try:
+                    outputs = model(
+                        input_ids=input_encodings.input_ids,
+                        attention_mask=input_encodings.attention_mask,
+                        labels=target_encodings.input_ids
+                    )
+                    
+                    loss = outputs.loss
+                    
+                    # Check for NaN loss
+                    if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 100.0:
+                        log_message(f"Warning: Invalid loss detected ({loss.item():.4f}), skipping batch {i//batch_size + 1}")
+                        continue
+                    
+                    # Backward pass
+                    optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # Check for NaN gradients and gradient explosion
+                    has_invalid_grad = False
+                    max_grad_norm = 0.0
+                    
+                    for param in trainable_params:
+                        if param.grad is not None:
+                            grad_norm = param.grad.data.norm()
+                            max_grad_norm = max(max_grad_norm, grad_norm.item())
+                            
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                has_invalid_grad = True
+                                break
+                    
+                    if has_invalid_grad:
+                        log_message(f"Warning: Invalid gradients detected, skipping batch {i//batch_size + 1}")
+                        continue
+                    
+                    if max_grad_norm > 10.0:
+                        log_message(f"Warning: Large gradient norm ({max_grad_norm:.2f}), clipping")
+                    
+                    # Gradient clipping with more conservative threshold
+                    torch.nn.utils.clip_grad_norm_(trainable_params, 0.5)
+                    
+                    optimizer.step()
+                    scheduler.step()
+                    
+                    epoch_loss += loss.item()
+                    valid_batches += 1
+                    
+                except Exception as e:
+                    log_message(f"Warning: Exception during training batch {i//batch_size + 1}: {str(e)}")
                     continue
                 
-                epoch_loss += loss.item()
                 num_batches += 1
-                
-                # Backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                
-                # Check for NaN gradients
-                has_nan_grad = False
-                for param in trainable_params:
-                    if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                        has_nan_grad = True
-                        break
-                
-                if has_nan_grad:
-                    log_message(f"Warning: NaN/Inf gradients detected, skipping batch {i//batch_size}")
-                    continue
-                
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-                optimizer.step()
                 
                 # Memory cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            avg_loss = epoch_loss / num_batches if num_batches > 0 else 0
-            log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}, Batches: {num_batches}")
+            avg_loss = epoch_loss / valid_batches if valid_batches > 0 else float('inf')
+            log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}, Valid Batches: {valid_batches}/{num_batches}")
+            
+            # Early stopping if loss becomes invalid
+            if avg_loss == float('inf') or avg_loss > 50.0:
+                log_message("Warning: Training unstable, stopping early")
+                break
         
         training_time = (time.time() - start_time) / 60
         return training_time
