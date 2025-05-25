@@ -131,7 +131,7 @@ def freeze_base_model(model):
     log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
 
 class ExpandedFFN(torch.nn.Module):
-    """FFN module with expansion capability"""
+    """FFN module with expansion capability - numerically stable version"""
     
     def __init__(self, original_ffn, expansion_size: int = 512, device: str = "cpu"):
         super().__init__()
@@ -160,7 +160,7 @@ class ExpandedFFN(torch.nn.Module):
             input_dim = 512  # T5-small default
             output_dim = 512
         
-        # Add expansion path (parallel to original)
+        # Add expansion path (parallel to original) - much simpler approach
         self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype)
         self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype)
         self.expansion_dropout = torch.nn.Dropout(0.1)
@@ -171,28 +171,22 @@ class ExpandedFFN(torch.nn.Module):
         self.expansion_down = self.expansion_down.to(device)
         self.expansion_dropout = self.expansion_dropout.to(device)
         
-        # Initialize expansion weights to start near zero for stability
-        # Use Xavier/Glorot initialization scaled down significantly
+        # Initialize weights to ZERO for maximum stability
         with torch.no_grad():
-            # Initialize up projection with very small values
-            torch.nn.init.xavier_uniform_(self.expansion_up.weight)
-            self.expansion_up.weight.data *= 0.001  # Scale down significantly
-            
-            # Initialize down projection to near zero
+            torch.nn.init.zeros_(self.expansion_up.weight)
             torch.nn.init.zeros_(self.expansion_down.weight)
-            
-        # Learnable scaling factor that starts very small
-        self.expansion_scale = torch.nn.Parameter(
-            torch.tensor(0.001, dtype=self.dtype, device=device)
-        )
+        
+        # Very simple learnable gate that starts at zero
+        self.gate = torch.nn.Parameter(torch.zeros(1, dtype=self.dtype, device=device))
         
         log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
         
     def forward(self, x):
         # Original FFN output (frozen)
-        original_out = self.original_ffn(x)
+        with torch.no_grad():
+            original_out = self.original_ffn(x)
         
-        # Expansion path (trainable) - start very small to avoid disrupting training
+        # Expansion path (trainable) - starts at zero contribution
         expanded = self.expansion_up(x)
         expanded = self.expansion_act(expanded)
         expanded = self.expansion_dropout(expanded)
@@ -201,18 +195,13 @@ class ExpandedFFN(torch.nn.Module):
         # Ensure expansion output matches original output dtype
         expanded = expanded.to(original_out.dtype)
         
-        # Apply learnable scaling and clamp to prevent extreme values
-        scaled_expansion = self.expansion_scale * expanded
-        scaled_expansion = torch.clamp(scaled_expansion, -10.0, 10.0)  # Prevent extreme values
+        # Apply very conservative gating (sigmoid to keep between 0 and 1)
+        gate_value = torch.sigmoid(self.gate) * 0.1  # Max 10% contribution
+        gated_expansion = gate_value * expanded
         
-        # Combine with residual connection
-        result = original_out + scaled_expansion
+        # Simple addition - no clamping needed since we start from zero
+        result = original_out + gated_expansion
         
-        # Additional safety check for NaN/Inf
-        if torch.isnan(result).any() or torch.isinf(result).any():
-            log_message("Warning: NaN/Inf detected in ExpandedFFN output, returning original output")
-            return original_out
-            
         return result
 
 def expand_model_ffn(model, expansion_size: int = 512):
@@ -316,7 +305,7 @@ class FFNExpansionContinualLearner:
                 expansion_state[name] = {
                     'expansion_up.weight': module.expansion_up.weight.data,
                     'expansion_down.weight': module.expansion_down.weight.data,
-                    'expansion_scale': module.expansion_scale.data,
+                    'gate': module.gate.data,
                     'expansion_size': module.expansion_size
                 }
         
@@ -356,8 +345,11 @@ class FFNExpansionContinualLearner:
             if isinstance(module, ExpandedFFN) and name in expansion_state:
                 module.expansion_up.weight.data = expansion_state[name]['expansion_up.weight']
                 module.expansion_down.weight.data = expansion_state[name]['expansion_down.weight']
-                if 'expansion_scale' in expansion_state[name]:
-                    module.expansion_scale.data = expansion_state[name]['expansion_scale']
+                if 'gate' in expansion_state[name]:
+                    module.gate.data = expansion_state[name]['gate']
+                elif 'expansion_scale' in expansion_state[name]:
+                    # Backward compatibility
+                    module.gate.data = expansion_state[name]['expansion_scale']
         
         return expanded_model
         
@@ -392,12 +384,12 @@ class FFNExpansionContinualLearner:
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         log_message(f"Training {len(trainable_params)} parameter groups, {sum(p.numel() for p in trainable_params):,} total parameters")
         
-        # Use very conservative learning rate for expansion training to prevent instability
-        optimizer = torch.optim.AdamW(trainable_params, lr=5e-5, weight_decay=0.01, eps=1e-8)
+        # Use extremely conservative learning rate for expansion training to prevent instability
+        optimizer = torch.optim.AdamW(trainable_params, lr=1e-5, weight_decay=0.01, eps=1e-8)
         
-        # Learning rate scheduler for gradual warmup
+        # Learning rate scheduler for very gradual warmup
         scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.1, total_iters=100
+            optimizer, start_factor=0.01, total_iters=200
         )
         
         model.train()
@@ -442,8 +434,8 @@ class FFNExpansionContinualLearner:
                     
                     loss = outputs.loss
                     
-                    # Check for NaN loss
-                    if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 100.0:
+                    # Check for invalid loss with more conservative thresholds
+                    if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 50.0:
                         log_message(f"Warning: Invalid loss detected ({loss.item():.4f}), skipping batch {i//batch_size + 1}")
                         continue
                     
@@ -451,7 +443,7 @@ class FFNExpansionContinualLearner:
                     optimizer.zero_grad()
                     loss.backward()
                     
-                    # Check for NaN gradients and gradient explosion
+                    # Check for NaN gradients and gradient explosion with stricter thresholds
                     has_invalid_grad = False
                     max_grad_norm = 0.0
                     
@@ -468,11 +460,11 @@ class FFNExpansionContinualLearner:
                         log_message(f"Warning: Invalid gradients detected, skipping batch {i//batch_size + 1}")
                         continue
                     
-                    if max_grad_norm > 10.0:
+                    if max_grad_norm > 5.0:  # More conservative threshold
                         log_message(f"Warning: Large gradient norm ({max_grad_norm:.2f}), clipping")
                     
-                    # Gradient clipping with more conservative threshold
-                    torch.nn.utils.clip_grad_norm_(trainable_params, 0.5)
+                    # Very aggressive gradient clipping
+                    torch.nn.utils.clip_grad_norm_(trainable_params, 0.1)
                     
                     optimizer.step()
                     scheduler.step()
@@ -494,7 +486,7 @@ class FFNExpansionContinualLearner:
             log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}, Valid Batches: {valid_batches}/{num_batches}")
             
             # Early stopping if loss becomes invalid
-            if avg_loss == float('inf') or avg_loss > 50.0:
+            if avg_loss == float('inf') or avg_loss > 20.0:
                 log_message("Warning: Training unstable, stopping early")
                 break
         
