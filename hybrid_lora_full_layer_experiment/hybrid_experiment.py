@@ -174,6 +174,12 @@ class HybridLoRAFullLayerLearner:
             model_with_layer = add_trainable_transformer_layer(base_model)
             log_message(f"Created new full layer for {task_name}")
         
+        # Store which layer index is the new layer
+        original_config = base_model.config
+        new_layer_idx = original_config.num_layers
+        
+        log_message(f"New layer index: {new_layer_idx}")
+        
         # Count parameters before LoRA
         pre_lora_trainable = sum(p.numel() for p in model_with_layer.parameters() if p.requires_grad)
         
@@ -189,10 +195,33 @@ class HybridLoRAFullLayerLearner:
         # Apply LoRA to the model with full layer
         hybrid_model = get_peft_model(model_with_layer, lora_config)
         
-        # Count trainable parameters after LoRA
+        # CRITICAL: Re-enable training for the full layer parameters that LoRA froze
+        # LoRA changes parameter names and adds prefixes, so we need to match by layer index
+        re_enabled_count = 0
+        re_enabled_params = 0
+        
+        for name, param in hybrid_model.named_parameters():
+            # Check if this parameter belongs to our new layer (layer index = new_layer_idx)
+            if f'encoder.block.{new_layer_idx}' in name and not param.requires_grad:
+                param.requires_grad = True
+                re_enabled_count += 1
+                re_enabled_params += param.numel()
+        
+        log_message(f"Re-enabled training for {re_enabled_count} full layer parameters ({re_enabled_params:,} params)")
+        
+        # Count trainable parameters after LoRA fix
         total_trainable = sum(p.numel() for p in hybrid_model.parameters() if p.requires_grad)
         lora_params = sum(p.numel() for n, p in hybrid_model.named_parameters() if 'lora' in n and p.requires_grad)
-        full_layer_params = pre_lora_trainable  # Parameters from the added transformer layer
+        
+        # Count full layer parameters (now trainable)
+        full_layer_params = sum(p.numel() for n, p in hybrid_model.named_parameters() 
+                               if f'encoder.block.{new_layer_idx}' in n and p.requires_grad and 'lora' not in n)
+        
+        # Verify the math
+        expected_total = lora_params + full_layer_params
+        if abs(total_trainable - expected_total) > 10:  # Allow small rounding differences
+            log_message(f"WARNING: Parameter count mismatch. Total={total_trainable}, Expected={expected_total}", level="WARNING")
+            log_message(f"  LoRA: {lora_params:,}, Full Layer: {full_layer_params:,}", level="WARNING")
         
         log_message(f"Hybrid model for {task_name}: LoRA={lora_params:,}, Full Layer={full_layer_params:,}, Total={total_trainable:,}")
         
@@ -204,12 +233,22 @@ class HybridLoRAFullLayerLearner:
         optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.01)
         model.train()
         
+        # Calculate total batches for progress tracking
+        total_batches = (len(data) + batch_size - 1) // batch_size  # Round up division
+        total_steps = total_batches * epochs
+        current_step = 0
+        
         log_message(f"Training hybrid model for {task_name}...")
+        log_message(f"Total steps: {total_steps} ({epochs} epochs × {total_batches} batches)")
         
         for epoch in range(epochs):
+            epoch_start_time = time.time()
             epoch_losses = []
             
             for i in range(0, len(data), batch_size):
+                batch_start_time = time.time()
+                current_step += 1
+                
                 batch_indices = list(range(i, min(i + batch_size, len(data))))
                 batch_data = data.select(batch_indices)
                 batch_texts = [text for text in batch_data["func_code_string"] if text and str(text).strip()]
@@ -235,10 +274,35 @@ class HybridLoRAFullLayerLearner:
                 
                 epoch_losses.append(loss.item())
                 
+                # Progress tracking every 10 batches or at end of epoch
+                if current_step % 10 == 0 or i + batch_size >= len(data):
+                    elapsed_time = time.time() - start_time
+                    progress_pct = (current_step / total_steps) * 100
+                    
+                    if current_step > 0:
+                        avg_time_per_step = elapsed_time / current_step
+                        remaining_steps = total_steps - current_step
+                        estimated_remaining = avg_time_per_step * remaining_steps
+                        
+                        elapsed_str = f"{elapsed_time/60:.1f}min"
+                        remaining_str = f"{estimated_remaining/60:.1f}min"
+                        
+                        log_message(f"  Step {current_step}/{total_steps} ({progress_pct:.1f}%) | "
+                                  f"Loss: {loss.item():.4f} | "
+                                  f"Elapsed: {elapsed_str} | "
+                                  f"Remaining: ~{remaining_str}")
+                
             avg_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-            log_message(f"Epoch {epoch+1}/{epochs}, Avg Loss: {avg_loss:.4f}")
+            epoch_time = time.time() - epoch_start_time
+            elapsed_total = time.time() - start_time
             
-        return (time.time() - start_time) / 60
+            log_message(f"Epoch {epoch+1}/{epochs} completed in {epoch_time/60:.1f}min | "
+                      f"Avg Loss: {avg_loss:.4f} | "
+                      f"Total Elapsed: {elapsed_total/60:.1f}min")
+            
+        total_time = (time.time() - start_time) / 60
+        log_message(f"Training {task_name} completed in {total_time:.2f} minutes")
+        return total_time
         
     def evaluate_model(self, model, data, num_samples: int = 100, language: str = None) -> Dict[str, float]:
         """Evaluate model comprehensively"""
