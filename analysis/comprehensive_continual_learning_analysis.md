@@ -4,6 +4,12 @@
 **Author**: Experimental Analysis System  
 **Scope**: Three-part experimental study on continual learning approaches  
 
+## ⚠️ Important Correction Notice
+
+**LoRA Parameter Count Correction**: During cross-experiment analysis, a significant discrepancy was discovered in the LoRA parameter reporting. The original LoRA-only experiment incorrectly reported ~60K parameters (0.1%), when the actual LoRA implementation used ~1.78M parameters (2.8%). This correction has been applied throughout all documentation to ensure accurate comparisons.
+
+**Impact**: This correction affects parameter efficiency rankings but does not change the core findings about performance and continual learning effectiveness. The hybrid approach remains the overall winner with the best performance/parameter trade-off.
+
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
@@ -37,7 +43,7 @@ graph TD
     
     B --> B1[Best JS Performance: 0.2489 BLEU]
     B --> B2[Minimal Forgetting: 0.78%]
-    B --> B3[Ultra-Efficient: 0.1% params]
+    B --> B3[Most Efficient: 2.8% params]
     
     C --> C1[Negative Forgetting: -6.20%]
     C --> C2[Memory Efficient Training]
@@ -226,7 +232,7 @@ sequenceDiagram
 
 **Key Metrics**:
 - **Forgetting Rate**: 0.78% (excellent)
-- **Parameter Efficiency**: ~60K parameters (0.1% of model)
+- **Parameter Efficiency**: ~1.78M parameters (2.8% of model)
 - **JavaScript Excellence**: Highest individual task performance (0.2489 BLEU)
 
 #### Full Layer-Only Approach
@@ -392,7 +398,7 @@ graph TD
     end
     
     subgraph "Efficiency Ranking"
-        E[1st: LoRA-Only<br/>0.1% parameters]
+        E[1st: LoRA-Only<br/>2.8% parameters]
         F[2nd: Full Layer-Only<br/>4.94% parameters]
         G[3rd: Hybrid Approaches<br/>7.7% parameters]
     end
@@ -412,7 +418,7 @@ graph TD
 
 | Approach | Python BLEU | JavaScript BLEU | Avg BLEU | Forgetting | Params | Time | Memory |
 |----------|-------------|-----------------|----------|------------|--------|------|--------|
-| **LoRA-Only** | 0.2150 | **0.2489** | 0.2320 | **0.78%** | **60K** | 22.97 min | 1.77 GB |
+| **LoRA-Only** | 0.2150 | **0.2489** | 0.2320 | **0.78%** | **1.78M** | 22.97 min | 1.77 GB |
 | **Full Layer-Only** | 0.2046 | 0.2147 | 0.2097 | **-6.20%** | 3.15M | 21.69 min | **0.01 GB** |
 | **Hybrid Task-Specific** | **0.2569** | 0.2425 | **0.2497** | 4.38% | 4.92M | **16.26 min** | 1.41 GB |
 | **Hybrid Shared** | 0.2569 | 0.2282 | 0.2426* | ? | 4.92M | ~16.26 min | ~1.41 GB |
@@ -608,7 +614,7 @@ graph TD
 
 ```mermaid
 graph LR
-    A[Ultra-Efficient<br/>LoRA: 0.1%] --> B[Moderate<br/>Full Layer: 4.94%] --> C[Balanced<br/>Hybrid: 7.7%]
+    A[Most Efficient<br/>LoRA: 2.8%] --> B[Moderate<br/>Full Layer: 4.94%] --> C[Balanced<br/>Hybrid: 7.7%]
     
     A --> A1[Minimal overhead<br/>Good performance]
     B --> B1[Moderate overhead<br/>Unique benefits]
@@ -742,9 +748,11 @@ Clear trade-offs exist between parameter efficiency and performance:
 
 | Efficiency Tier | Approach | Parameters | Performance | Use Case |
 |------------------|----------|------------|-------------|----------|
-| **Ultra-Efficient** | LoRA-Only | 0.1% | Good | Resource-constrained |
+| **Most Efficient** | LoRA-Only | 2.8% | Good | Resource-constrained |
 | **Balanced** | Full Layer-Only | 4.94% | Moderate | Specialized scenarios |
 | **Performance-Optimized** | Hybrid | 7.7% | **Best** | Production systems |
+
+**Key Insight**: The parameter efficiency gap between approaches is smaller than initially thought. LoRA uses 2.8% vs Full Layer's 4.94% (1.8× difference), making the hybrid approach's 7.7% overhead more reasonable for the significant performance gains achieved.
 
 #### 4. Continual Learning Effectiveness
 
@@ -760,7 +768,7 @@ Different approaches excel in different aspects of continual learning:
 1. **Component Complementarity**: Demonstrated that different parameter-efficient methods can be synergistically combined
 2. **Emergent Performance**: Showed that hybrid architectures can achieve non-linear performance gains
 3. **Negative Forgetting**: Confirmed that well-designed continual learning can improve rather than degrade previous knowledge
-4. **Efficiency-Performance Trade-offs**: Quantified the relationship between parameter overhead and performance gains
+4. **Efficiency-Performance Trade-offs**: Quantified the relationship between parameter overhead and performance gains - the efficiency gap between methods is smaller than initially apparent, making hybrid approaches more attractive
 
 ### Practical Impact
 
@@ -793,12 +801,12 @@ Based on comprehensive analysis across all metrics:
 
 #### Strategic Implementation
 
-1. **Start with Hybrid Task-Specific** for most applications
-2. **Fall back to LoRA-Only** for extreme resource constraints
-3. **Consider Full Layer-Only** for research into positive transfer
+1. **Start with Hybrid Task-Specific** for most applications - the parameter overhead (7.7%) is reasonable for the performance gains
+2. **Use LoRA-Only** for moderate resource constraints - still efficient at 2.8% parameters
+3. **Consider Full Layer-Only** for research into positive transfer - only 4.94% parameters with unique benefits
 4. **Investigate Hybrid Shared Layer** for cross-task transfer scenarios
 
-The hybrid approach represents a **paradigm shift** in parameter-efficient continual learning, demonstrating that thoughtful combination of existing methods can yield superior results compared to using them in isolation.
+The corrected parameter analysis shows that **all approaches are reasonably parameter-efficient**, with the hybrid approach representing an excellent **performance-per-parameter value** rather than a significant efficiency compromise.
 
 ---
 

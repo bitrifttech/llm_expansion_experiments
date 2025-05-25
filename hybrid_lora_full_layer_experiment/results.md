@@ -195,7 +195,7 @@ Training Speed: ~4 minutes per epoch
 
 | Approach | Python BLEU | JavaScript BLEU | Avg BLEU | Forgetting Rate | Trainable Params | Training Time |
 |----------|-------------|-----------------|----------|-----------------|------------------|---------------|
-| **LoRA-Only** | 0.2150 | **0.2489** | **0.2320** | 0.78% | ~60K (0.1%) | 22.97 min |
+| **LoRA-Only** | 0.2150 | **0.2489** | **0.2320** | 0.78% | ~1.78M (2.8%) | 22.97 min |
 | **Full Layer-Only** | 0.2046 | 0.2147 | 0.2097 | **-6.20%** | 3.15M (4.94%) | 21.69 min |
 | **Hybrid (Task-Specific)** | **0.2569** | 0.2425 | 0.2497 | 4.38% | 4.92M (7.7%) | 16.26 min |
 | **Hybrid (Shared Layer)** | 0.2569 | 0.2282 | 0.2426 | ? | 4.92M (7.7%) | ~16.26 min |
@@ -214,7 +214,7 @@ Training Speed: ~4 minutes per epoch
 - **Unknown**: Hybrid Shared Layer (experiment incomplete)
 
 #### 3. **Parameter Efficiency Analysis**
-- **Most Parameter Efficient**: LoRA-Only (60K parameters, 0.1% of model)
+- **Most Parameter Efficient**: LoRA-Only (1.78M parameters, 2.8% of model)
 - **Moderate Efficiency**: Full Layer-Only (3.15M parameters, 4.94% of model)
 - **Least Efficient**: Hybrid approaches (4.92M parameters, 7.7% of model)
 
@@ -232,7 +232,7 @@ Training Speed: ~4 minutes per epoch
 | **Overall Performance** | **Hybrid Task-Specific** | 0.2497 avg BLEU | Combining LoRA + Full Layer provides best results |
 | **Individual Task Excellence** | LoRA-Only (JS) | 0.2489 BLEU | LoRA excels at specific task adaptation |
 | **Knowledge Preservation** | Full Layer-Only | -6.20% forgetting | Unexpected positive transfer |
-| **Parameter Efficiency** | LoRA-Only | 0.1% parameters | Minimal overhead approach |
+| **Parameter Efficiency** | LoRA-Only | 2.8% parameters | Minimal overhead approach |
 | **Training Speed** | Hybrid approaches | ~16.3 min | Parallel component training |
 | **Memory Efficiency** | Full Layer-Only | 0.01 GB | Localized training |
 

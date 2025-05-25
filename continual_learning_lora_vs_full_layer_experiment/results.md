@@ -1,5 +1,9 @@
 # Continual Learning Experiment: Detailed Results Analysis
 
+## ⚠️ Parameter Count Correction Notice
+
+**Important Update**: The original analysis incorrectly reported LoRA parameters as ~60K (0.1%). The correct count is ~1.78M parameters (2.8%) for the full LoRA implementation across all encoder/decoder layers. This document has been updated with the corrected values. The core findings about performance and continual learning effectiveness remain unchanged.
+
 ## Executive Summary
 
 This document presents a comprehensive analysis of an experiment comparing two continual learning approaches for code generation models: **LoRA (Low-Rank Adaptation)** and **Full Layer Training**. The experiment demonstrates that both approaches successfully mitigate catastrophic forgetting while showing distinct performance characteristics.
@@ -48,9 +52,9 @@ Both approaches started with identical baseline performance from the frozen code
 ## LoRA Approach: Detailed Results
 
 ### Architecture
-- **Trainable Parameters**: ~0.1% of total model parameters
+- **Trainable Parameters**: ~1.78M parameters (2.8% of total model parameters)
 - **Configuration**: Rank=16, Alpha=32, Dropout=0.1
-- **Target Modules**: Query, Key, Value, Output, Feed-Forward layers
+- **Target Modules**: Query, Key, Value, Output, Feed-Forward layers (all encoder/decoder layers)
 - **Isolation**: Perfect task separation via adapter swapping
 
 ### Phase 1: Python Training (13:45 - 13:57)
@@ -91,7 +95,7 @@ Both approaches started with identical baseline performance from the frozen code
 - **Trainable Parameters**: 3,146,752 (4.94% of total model)
 - **Design**: Frozen base + additional transformer layer per task
 - **Isolation**: Task-specific layer checkpoints
-- **Parameter Efficiency**: 50× more trainable parameters than LoRA
+- **Parameter Efficiency**: 1.8× more trainable parameters than LoRA
 
 ### Phase 1: Python Training (14:11 - 14:22)
 **Training Duration**: 11 minutes
@@ -150,8 +154,8 @@ Both approaches started with identical baseline performance from the frozen code
 |--------|------|------------|-----------------|
 | Total Time | 22.97 min | **21.69 min** | Full Layer |
 | Memory Usage | 1.77 GB | **0.01 GB** | Full Layer |
-| Parameters Trained | ~60K | 3.1M | LoRA (efficiency) |
-| Parameter Ratio | 0.1% | 4.94% | LoRA |
+| Parameters Trained | ~1.78M | 3.1M | LoRA (efficiency) |
+| Parameter Ratio | 2.8% | 4.94% | LoRA |
 
 ---
 
@@ -228,7 +232,7 @@ Both approaches demonstrate **successful continual learning**:
 
 1. **LoRA Superior Task Performance**: 15.9% better JavaScript BLEU demonstrates superior adaptation capability
 2. **Full Layer Knowledge Enhancement**: Negative forgetting suggests cross-task benefits
-3. **Efficiency Trade-offs**: LoRA uses 50× fewer parameters but consumes more training memory
+3. **Efficiency Trade-offs**: LoRA uses 1.8× fewer parameters but consumes more training memory
 4. **Successful Continual Learning**: Both approaches avoid catastrophic forgetting
 
 ### Theoretical Implications
