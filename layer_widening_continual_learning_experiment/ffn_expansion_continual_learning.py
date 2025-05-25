@@ -139,6 +139,9 @@ class ExpandedFFN(torch.nn.Module):
         self.expansion_size = expansion_size
         self.device = device
         
+        # Get dtype from original FFN
+        self.dtype = next(original_ffn.parameters()).dtype
+        
         # Freeze original FFN
         for param in self.original_ffn.parameters():
             param.requires_grad = False
@@ -154,8 +157,8 @@ class ExpandedFFN(torch.nn.Module):
             output_dim = 512
         
         # Add expansion to intermediate layer (parallel to original)
-        self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False)
-        self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False)
+        self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype)
+        self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype)
         self.activation = torch.nn.ReLU()  # Use ReLU like T5
         
         # Move expansion modules to correct device
@@ -166,7 +169,7 @@ class ExpandedFFN(torch.nn.Module):
         torch.nn.init.normal_(self.expansion_up.weight, std=0.02)
         torch.nn.init.normal_(self.expansion_down.weight, std=0.02)
         
-        log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device}")
+        log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
         
     def forward(self, x):
         # Original FFN output (frozen)
