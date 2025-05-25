@@ -2,6 +2,120 @@
 
 This package provides shared utilities for analyzing models and calculating metrics across different continual learning experiments.
 
+## CodeSearchNetDataLoader
+
+The `CodeSearchNetDataLoader` class provides consistent data loading and preparation for all continual learning experiments, ensuring fair comparison between different approaches.
+
+### Features
+
+- **🔄 Consistent Splits**: Ensures all experiments use identical data splits
+- **📊 Multiple Formats**: Supports HuggingFace datasets, dict format, and raw format
+- **🎯 Reproducible**: Uses fixed seeds for reproducible data loading
+- **✅ Validation**: Built-in data consistency validation
+- **📈 Statistics**: Provides data statistics and summaries
+- **🔧 Flexible**: Configurable train/validation split sizes
+
+### Usage
+
+#### Drop-in Replacement (Recommended)
+```python
+from utils.data_loader import load_and_prepare_data
+
+# Exact same interface as original experiments
+python_train, python_val, js_train, js_val = load_and_prepare_data()
+
+# With custom sizes
+python_train, python_val, js_train, js_val = load_and_prepare_data(
+    python_train_size=15000,
+    python_val_size=5000,
+    js_train_size=15000,
+    js_val_size=5000,
+    format_type="huggingface"
+)
+```
+
+#### Class-based Usage (More Control)
+```python
+from utils.data_loader import CodeSearchNetDataLoader
+
+# Create loader with custom configuration
+loader = CodeSearchNetDataLoader(
+    python_train_size=15000,
+    python_val_size=5000,
+    js_train_size=15000,
+    js_val_size=5000,
+    seed=42
+)
+
+# Load data in different formats
+python_train, python_val, js_train, js_val = loader.load_data(format_type="huggingface")
+
+# Get statistics
+stats = loader.get_data_stats()
+print(f"Total samples: {stats['total_samples']}")
+
+# Validate consistency
+is_consistent = loader.validate_data_consistency()
+```
+
+### Supported Formats
+
+#### 1. HuggingFace Format (`format_type="huggingface"`)
+Returns HuggingFace Dataset objects with original CodeSearchNet fields:
+```python
+# Returns: datasets.Dataset objects
+python_train, python_val, js_train, js_val = loader.load_data("huggingface")
+sample = python_train[0]  # Access: sample['func_code_string'], sample['func_documentation_string']
+```
+
+#### 2. Dict Format (`format_type="dict"`)
+Returns lists of dictionaries with `input`/`target` keys for training:
+```python
+# Returns: List[Dict] with 'input' and 'target' keys
+python_train, python_val, js_train, js_val = loader.load_data("dict")
+sample = python_train[0]  # Access: sample['input'], sample['target']
+```
+
+#### 3. Raw Format (`format_type="raw"`)
+Returns lists of dictionaries with original CodeSearchNet fields:
+```python
+# Returns: List[Dict] with original fields
+python_train, python_val, js_train, js_val = loader.load_data("raw")
+sample = python_train[0]  # Access: sample['func_name'], sample['docstring'], sample['code']
+```
+
+### Integration in Experiments
+
+Replace existing `load_and_prepare_data()` functions:
+
+```python
+# OLD WAY (inconsistent across experiments)
+def load_and_prepare_data():
+    dataset = load_dataset("code_search_net", split="train")
+    python_data = dataset.filter(lambda x: x["language"] == "python").select(range(20000))
+    # ... different implementations in each experiment
+
+# NEW WAY (consistent across all experiments)
+from utils.data_loader import load_and_prepare_data
+
+python_train, python_val, js_train, js_val = load_and_prepare_data(
+    python_train_size=15000,
+    python_val_size=5000,
+    js_train_size=15000,
+    js_val_size=5000,
+    format_type="huggingface"  # or "dict" or "raw"
+)
+```
+
+### Benefits
+
+- **🔄 Consistency**: All experiments use identical data splits
+- **🎯 Fair Comparison**: Eliminates data-related variables between approaches
+- **⚡ Efficiency**: Cached loading and format conversion
+- **🔧 Flexibility**: Multiple formats for different experiment needs
+- **✅ Reliability**: Built-in validation and error handling
+- **📊 Transparency**: Clear statistics and data summaries
+
 ## ModelAnalyzer
 
 The `ModelAnalyzer` class provides comprehensive analysis of transformer models including:
