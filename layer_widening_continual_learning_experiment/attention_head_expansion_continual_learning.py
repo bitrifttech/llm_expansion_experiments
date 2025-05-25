@@ -246,10 +246,25 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         new_k = self.new_k_proj(kv_input)       # [batch, kv_seq_len, num_new_heads * d_kv]
         new_v = self.new_v_proj(kv_input)       # [batch, kv_seq_len, num_new_heads * d_kv]
         
-        # Reshape for multi-head attention
+        # Get actual sequence lengths
+        kv_seq_length = kv_input.size(1)
+        
+        # Safety check: ensure projections have correct dimensions
+        expected_q_dim = self.num_new_heads * self.d_kv
+        expected_k_dim = self.num_new_heads * self.d_kv
+        expected_v_dim = self.num_new_heads * self.d_kv
+        
+        if new_q.size(-1) != expected_q_dim:
+            raise ValueError(f"Q projection dimension mismatch: expected {expected_q_dim}, got {new_q.size(-1)}")
+        if new_k.size(-1) != expected_k_dim:
+            raise ValueError(f"K projection dimension mismatch: expected {expected_k_dim}, got {new_k.size(-1)}")
+        if new_v.size(-1) != expected_v_dim:
+            raise ValueError(f"V projection dimension mismatch: expected {expected_v_dim}, got {new_v.size(-1)}")
+        
+        # Reshape for multi-head attention with explicit dimensions
         new_q = new_q.view(batch_size, seq_length, self.num_new_heads, self.d_kv).transpose(1, 2)
-        new_k = new_k.view(batch_size, -1, self.num_new_heads, self.d_kv).transpose(1, 2)
-        new_v = new_v.view(batch_size, -1, self.num_new_heads, self.d_kv).transpose(1, 2)
+        new_k = new_k.view(batch_size, kv_seq_length, self.num_new_heads, self.d_kv).transpose(1, 2)
+        new_v = new_v.view(batch_size, kv_seq_length, self.num_new_heads, self.d_kv).transpose(1, 2)
         
         # Compute attention scores
         scores = torch.matmul(new_q, new_k.transpose(-2, -1)) / np.sqrt(self.d_kv)
@@ -259,8 +274,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
             # T5 attention masks can have different shapes, handle them properly
             if mask.dim() == 2:  # [batch, seq_len]
                 # Standard case: expand to [batch, num_heads, seq_len, kv_seq_len]
-                kv_seq_len = new_k.size(-2)
-                expanded_mask = mask.unsqueeze(1).unsqueeze(1).expand(-1, self.num_new_heads, -1, kv_seq_len)
+                expanded_mask = mask.unsqueeze(1).unsqueeze(1).expand(-1, self.num_new_heads, -1, kv_seq_length)
             elif mask.dim() == 3:  # [batch, seq_len, kv_seq_len]
                 # Cross-attention case
                 expanded_mask = mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
@@ -283,10 +297,16 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 expanded_mask = squeezed_mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
             else:
                 # Fallback: try to reshape to 4D
-                batch_size = mask.size(0)
-                seq_len = scores.size(-2)
-                kv_seq_len = scores.size(-1)
-                expanded_mask = mask.view(batch_size, 1, seq_len, kv_seq_len).expand(-1, self.num_new_heads, -1, -1)
+                batch_size_mask = mask.size(0)
+                seq_len_mask = scores.size(-2)
+                kv_seq_len_mask = scores.size(-1)
+                try:
+                    expanded_mask = mask.view(batch_size_mask, 1, seq_len_mask, kv_seq_len_mask).expand(-1, self.num_new_heads, -1, -1)
+                except RuntimeError as e:
+                    # If reshaping fails, create a default mask
+                    log_message(f"Warning: Mask reshaping failed ({e}), using default mask")
+                    expanded_mask = torch.ones(batch_size, self.num_new_heads, seq_len_mask, kv_seq_len_mask, 
+                                             device=scores.device, dtype=torch.bool)
             
             scores = scores.masked_fill(expanded_mask == 0, -1e9)
         
