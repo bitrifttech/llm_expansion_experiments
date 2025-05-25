@@ -576,41 +576,48 @@ def get_memory_usage():
     return psutil.virtual_memory().used / 1024**3
 
 def load_and_prepare_data():
-    """Load and prepare CodeSearchNet dataset"""
+    """Load and prepare CodeSearchNet dataset - SAME AS OTHER EXPERIMENTS"""
     log_message("Loading CodeSearchNet dataset...")
     
-    # Load Python data
-    python_dataset = load_dataset("code_search_net", "python", split="train")
-    python_data = []
-    for item in python_dataset:
-        if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
-            python_data.append({
-                'func_name': item['func_name'],
-                'docstring': item['func_documentation_string'],
-                'code': item['func_code_string']
-            })
-    
-    # Load JavaScript data
-    js_dataset = load_dataset("code_search_net", "javascript", split="train")
-    js_data = []
-    for item in js_dataset:
-        if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
-            js_data.append({
-                'func_name': item['func_name'],
-                'docstring': item['func_documentation_string'],
-                'code': item['func_code_string']
-            })
-    
-    # Split into train/val
-    python_train = python_data[:8000]
-    python_val = python_data[8000:10000]
-    js_train = js_data[:8000]
-    js_val = js_data[8000:10000]
-    
-    log_message(f"Data loaded: Python train={len(python_train)}, val={len(python_val)}")
-    log_message(f"Data loaded: JavaScript train={len(js_train)}, val={len(js_val)}")
-    
-    return python_train, python_val, js_train, js_val
+    try:
+        # Use the EXACT same approach as LoRA vs Full Layer experiment
+        dataset = load_dataset("code_search_net", split="train")
+        
+        # Filter and prepare datasets - SAME SPLITS AS OTHER EXPERIMENTS
+        python_data = dataset.filter(lambda x: x["language"] == "python").select(range(20000))
+        js_data = dataset.filter(lambda x: x["language"] == "javascript").select(range(20000))
+        
+        # Split into train/val - SAME AS OTHER EXPERIMENTS
+        python_train = python_data.select(range(15000))
+        python_val = python_data.select(range(15000, 20000))
+        js_train = js_data.select(range(15000))
+        js_val = js_data.select(range(15000, 20000))
+        
+        # Convert to the format expected by FFN expansion (dict format)
+        def convert_to_dict_format(dataset_split):
+            converted = []
+            for item in dataset_split:
+                if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
+                    converted.append({
+                        'func_name': item['func_name'],
+                        'docstring': item['func_documentation_string'],
+                        'code': item['func_code_string']
+                    })
+            return converted
+        
+        python_train_dict = convert_to_dict_format(python_train)
+        python_val_dict = convert_to_dict_format(python_val)
+        js_train_dict = convert_to_dict_format(js_train)
+        js_val_dict = convert_to_dict_format(js_val)
+        
+        log_message(f"Dataset prepared: Python train={len(python_train_dict)}, val={len(python_val_dict)}")
+        log_message(f"                  JavaScript train={len(js_train_dict)}, val={len(js_val_dict)}")
+        
+        return python_train_dict, python_val_dict, js_train_dict, js_val_dict
+        
+    except Exception as e:
+        log_message(f"Dataset loading error: {e}", level="ERROR")
+        sys.exit(1)
 
 def calculate_continual_learning_metrics(python_before: Dict, js_after_python: Dict,
                                        python_after_js: Dict, js_after_js: Dict) -> Dict[str, float]:
@@ -653,7 +660,7 @@ def run_ffn_expansion_experiment(model_name: str, tokenizer, python_train, pytho
     python_training_time = learner.train_task(python_train, "python")
     
     # Evaluate Python after Python training
-    python_results_after_python = learner.evaluate_task(python_val, "python", 100)
+    python_results_after_python = learner.evaluate_task(python_val, "python", 50)
     log_message(f"Python after Python training: BLEU {python_results_after_python['bleu']:.4f}, Pass Rate {python_results_after_python['pass_rate']:.2%}")
     
     # Phase 2: Train on JavaScript (fresh model)
@@ -665,12 +672,12 @@ def run_ffn_expansion_experiment(model_name: str, tokenizer, python_train, pytho
     js_training_time = js_learner.train_task(js_train, "javascript")
     
     # Evaluate JavaScript after JavaScript training
-    js_results_after_js = js_learner.evaluate_task(js_val, "javascript", 100)
+    js_results_after_js = js_learner.evaluate_task(js_val, "javascript", 50)
     log_message(f"JavaScript after JavaScript training: BLEU {js_results_after_js['bleu']:.4f}, Pass Rate {js_results_after_js['pass_rate']:.2%}")
     
     # Phase 3: Evaluate Python on JavaScript model (catastrophic forgetting test)
     log_message("Phase 3: Evaluating Python on JavaScript model (forgetting test)...")
-    python_results_after_js = js_learner.evaluate_task(python_val, "python", 100)
+    python_results_after_js = js_learner.evaluate_task(python_val, "python", 50)
     log_message(f"Python after JavaScript training: BLEU {python_results_after_js['bleu']:.4f}, Pass Rate {python_results_after_js['pass_rate']:.2%}")
     
     # Calculate metrics
@@ -733,26 +740,22 @@ def run_ffn_expansion_experiment(model_name: str, tokenizer, python_train, pytho
 def main():
     """Main experimental function"""
     log_message("Starting FFN Expansion Continual Learning Experiment")
+    log_message("FAIR COMPARISON: Using EXACT same data splits as LoRA vs Full Layer experiment")
     
     # Initialize components
     model_name = "Salesforce/codet5-small"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    # Load data
+    # Load data - SAME AS OTHER EXPERIMENTS
     python_train, python_val, js_train, js_val = load_and_prepare_data()
     
-    # Use smaller datasets for testing
-    python_train = python_train[:1000]  # Reduced from 8000
-    python_val = python_val[:200]       # Reduced from 2000
-    js_train = js_train[:1000]          # Reduced from 8000
-    js_val = js_val[:200]               # Reduced from 2000
+    # Use same evaluation sample sizes as other experiments for consistency
+    log_message(f"Using full datasets: Python train={len(python_train)}, val={len(python_val)}")
+    log_message(f"Using full datasets: JavaScript train={len(js_train)}, val={len(js_val)}")
     
-    log_message(f"Using reduced datasets: Python train={len(python_train)}, val={len(python_val)}")
-    log_message(f"Using reduced datasets: JavaScript train={len(js_train)}, val={len(js_val)}")
-    
-    # Run experiment
+    # Run experiment with same seed as other experiments
     seed = 42
-    expansion_size = 256  # Reduced from 512 for faster testing
+    expansion_size = 512  # Use full expansion size for fair comparison
     
     results = run_ffn_expansion_experiment(
         model_name, tokenizer, python_train, python_val, 
