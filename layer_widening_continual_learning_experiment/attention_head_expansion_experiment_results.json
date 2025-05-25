@@ -1,0 +1,27 @@
+{
+  "approach": "attention_head_expansion",
+  "num_new_heads": 4,
+  "model_name": "Salesforce/codet5-small",
+  "device": "mps",
+  "training_times": {
+    "python": 0.8207850019137065,
+    "javascript": 0.3776464025179545
+  },
+  "bleu_scores": {
+    "python_after_python": 0.0,
+    "javascript_after_javascript": 0.0,
+    "python_after_javascript": 0.0
+  },
+  "pass_rates": {
+    "python_after_python": 0.0,
+    "javascript_after_javascript": 0.0,
+    "python_after_javascript": 0.0
+  },
+  "memory_usage": 11.669143676757812,
+  "total_training_time": 1.6916996320088704,
+  "forgetting_rate": 0,
+  "average_bleu": 0.0,
+  "total_parameters": 69929490,
+  "trainable_parameters": 9437202,
+  "parameter_efficiency": 13.495310776612271
+}
