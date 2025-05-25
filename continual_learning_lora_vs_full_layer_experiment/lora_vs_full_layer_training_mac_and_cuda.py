@@ -23,6 +23,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for data loader
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.data_loader import load_and_prepare_data
+
 # Set random seeds for reproducibility
 def set_seed(seed: int):
     random.seed(seed)
@@ -838,32 +842,6 @@ def calculate_continual_learning_metrics(baseline_python: Dict, baseline_js: Dic
         'retention_score': retention_score
     }
 
-def load_and_prepare_data():
-    """Load and prepare datasets"""
-    log_message("Loading CodeSearchNet dataset...")
-    
-    try:
-        dataset = load_dataset("code_search_net", split="train")
-        
-        # Filter and prepare datasets
-        python_data = dataset.filter(lambda x: x["language"] == "python").select(range(20000))
-        js_data = dataset.filter(lambda x: x["language"] == "javascript").select(range(20000))
-        
-        # Split into train/val
-        python_train = python_data.select(range(15000))
-        python_val = python_data.select(range(15000, 20000))
-        js_train = js_data.select(range(15000))
-        js_val = js_data.select(range(15000, 20000))
-        
-        log_message(f"Dataset prepared: Python train={len(python_train)}, val={len(python_val)}")
-        log_message(f"                  JavaScript train={len(js_train)}, val={len(js_val)}")
-        
-        return python_train, python_val, js_train, js_val
-        
-    except Exception as e:
-        log_message(f"Dataset loading error: {e}", level="ERROR")
-        sys.exit(1)
-
 def run_single_experiment(learner_class, model_name: str, tokenizer, python_train, python_val, js_train, js_val, seed: int) -> ExperimentResults:
     """Run a single experimental trial with comprehensive evaluation metrics"""
     set_seed(seed)
@@ -1105,8 +1083,15 @@ def main():
         log_message(f"Tokenizer error: {e}", level="ERROR")
         sys.exit(1)
     
-    # Load data
-    python_train, python_val, js_train, js_val = load_and_prepare_data()
+    # Load data using the new unified data loader (same splits as original)
+    python_train, python_val, js_train, js_val = load_and_prepare_data(
+        python_train_size=15000,
+        python_val_size=5000,
+        js_train_size=15000,
+        js_val_size=5000,
+        format_type="huggingface",
+        seed=42
+    )
     
     # Run multiple experiments with different seeds
     seeds = [42]  # Start with just one seed for testing

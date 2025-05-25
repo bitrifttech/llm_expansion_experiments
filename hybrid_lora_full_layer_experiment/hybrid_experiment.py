@@ -23,6 +23,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for data loader
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.data_loader import load_and_prepare_data
+
 # Set random seeds for reproducibility
 def set_seed(seed: int):
     random.seed(seed)
@@ -385,30 +389,6 @@ def get_memory_usage():
     """Get current memory usage in GB"""
     return psutil.Process().memory_info().rss / 1024**3
 
-def load_and_prepare_data():
-    """Load and prepare datasets"""
-    log_message("Loading CodeSearchNet dataset...")
-    
-    try:
-        dataset = load_dataset("code_search_net", split="train")
-        
-        python_data = dataset.filter(lambda x: x["language"] == "python").select(range(10000))  # Smaller for testing
-        js_data = dataset.filter(lambda x: x["language"] == "javascript").select(range(10000))
-        
-        python_train = python_data.select(range(8000))
-        python_val = python_data.select(range(8000, 10000))
-        js_train = js_data.select(range(8000))
-        js_val = js_data.select(range(8000, 10000))
-        
-        log_message(f"Dataset prepared: Python train={len(python_train)}, val={len(python_val)}")
-        log_message(f"                  JavaScript train={len(js_train)}, val={len(js_val)}")
-        
-        return python_train, python_val, js_train, js_val
-        
-    except Exception as e:
-        log_message(f"Dataset loading error: {e}", level="ERROR")
-        sys.exit(1)
-
 def run_experiment_1_task_specific(learner, python_train, python_val, js_train, js_val, seed: int):
     """Experiment 1: Task-specific LoRA + Full Layer components"""
     log_message("=== EXPERIMENT 1: TASK-SPECIFIC COMPONENTS ===")
@@ -595,8 +575,15 @@ def main():
     model_name = "Salesforce/codet5-small"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    # Load data
-    python_train, python_val, js_train, js_val = load_and_prepare_data()
+    # Load data using the new unified data loader (same splits as original hybrid experiment)
+    python_train, python_val, js_train, js_val = load_and_prepare_data(
+        python_train_size=8000,
+        python_val_size=2000,
+        js_train_size=8000,
+        js_val_size=2000,
+        format_type="huggingface",
+        seed=42
+    )
     
     # Run experiments
     seed = 42
