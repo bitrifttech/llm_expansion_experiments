@@ -154,9 +154,9 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         self.dropout = torch.nn.Dropout(0.1)
         
         # Gate to control contribution of new heads (start more enabled for better gradient flow)
-        self.gate = torch.nn.Parameter(torch.tensor(-2.0, dtype=self.dtype, device=device))  # sigmoid(-2) ≈ 0.12 (12%)
+        self.gate = torch.nn.Parameter(torch.tensor(0.0, dtype=self.dtype, device=device))  # sigmoid(0) = 0.5 (50%)
         
-        # Initialize new head weights conservatively
+        # Initialize new head weights more aggressively for better learning
         with torch.no_grad():
             # Copy weights from original attention heads for stability
             # This provides much better initialization than random weights
@@ -193,15 +193,15 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 self.new_v_proj.weight.data = tiled_v.clone()
                 self.new_o_proj.weight.data = tiled_o.clone()
             
-            # Scale down the copied weights to start with smaller contribution
-            scale_factor = 0.5  # Start with 50% of original magnitude (increased from 30%)
+            # Scale up the copied weights for stronger initial signal
+            scale_factor = 1.0  # Start with full magnitude (increased from 50%)
             self.new_q_proj.weight.data *= scale_factor
             self.new_k_proj.weight.data *= scale_factor
             self.new_v_proj.weight.data *= scale_factor
             self.new_o_proj.weight.data *= scale_factor
             
-            # Add larger random noise for diversity and better gradient flow
-            noise_std = 0.05  # Increased noise significantly for better gradient flow
+            # Add significant random noise for diversity and better gradient flow
+            noise_std = 0.1  # Increased noise significantly for better gradient flow
             self.new_q_proj.weight.data += torch.randn_like(self.new_q_proj.weight.data) * noise_std
             self.new_k_proj.weight.data += torch.randn_like(self.new_k_proj.weight.data) * noise_std
             self.new_v_proj.weight.data += torch.randn_like(self.new_v_proj.weight.data) * noise_std
@@ -352,7 +352,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 return original_outputs
             
             # Apply gate to control contribution
-            gate_value = torch.sigmoid(self.gate) * 0.25  # Max 25% contribution (increased from 10%)
+            gate_value = torch.sigmoid(self.gate) * 0.5  # Max 50% contribution (increased from 25%)
             gated_new_output = gate_value * new_attention_output
             
             # Combine original and new attention outputs
