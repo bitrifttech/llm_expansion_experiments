@@ -131,7 +131,7 @@ def freeze_base_model(model):
     log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
 
 class ExpandedFFN(torch.nn.Module):
-    """FFN module with expansion capability - numerically stable version"""
+    """FFN module with expansion capability - ultra-stable version"""
     
     def __init__(self, original_ffn, expansion_size: int = 512, device: str = "cpu"):
         super().__init__()
@@ -151,79 +151,67 @@ class ExpandedFFN(torch.nn.Module):
         if hasattr(original_ffn, 'wi'):
             input_dim = original_ffn.wi.in_features
             output_dim = original_ffn.wo.out_features
-            original_wi_weight = original_ffn.wi.weight.data
-            original_wo_weight = original_ffn.wo.weight.data
         elif hasattr(original_ffn, 'wi_0'):
             # For larger T5 models that use gated FFN
             input_dim = original_ffn.wi_0.in_features
             output_dim = original_ffn.wo.out_features
-            original_wi_weight = original_ffn.wi_0.weight.data
-            original_wo_weight = original_ffn.wo.weight.data
         else:
             # Fallback for different FFN structures
             input_dim = 512  # T5-small default
             output_dim = 512
-            original_wi_weight = None
-            original_wo_weight = None
         
-        # Add expansion path (parallel to original) - copy from original for stability
-        self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype, device=device)
-        self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype, device=device)
-        self.expansion_dropout = torch.nn.Dropout(0.1)
-        self.expansion_act = torch.nn.ReLU()
+        # Ultra-simple expansion: just learnable residual weights
+        # Start with identity mapping (zero residual)
+        self.expansion_residual = torch.nn.Parameter(
+            torch.zeros(output_dim, dtype=self.dtype, device=device)
+        )
         
-        # Initialize weights by copying from original FFN for known-good values
-        with torch.no_grad():
-            if original_wi_weight is not None and original_wo_weight is not None:
-                # Copy a subset of the original weights to match our expansion size
-                original_hidden_dim = original_wi_weight.shape[0]  # Usually 2048 for T5-small
-                
-                if expansion_size <= original_hidden_dim:
-                    # If expansion is smaller, take a subset
-                    self.expansion_up.weight.data = original_wi_weight[:expansion_size, :].clone().to(dtype=self.dtype, device=device)
-                    self.expansion_down.weight.data = original_wo_weight[:, :expansion_size].clone().to(dtype=self.dtype, device=device)
-                else:
-                    # If expansion is larger, repeat/tile the original weights
-                    repeat_factor = (expansion_size + original_hidden_dim - 1) // original_hidden_dim
-                    expanded_wi = original_wi_weight.repeat(repeat_factor, 1)[:expansion_size, :]
-                    expanded_wo = original_wo_weight.repeat(1, repeat_factor)[:, :expansion_size]
-                    
-                    self.expansion_up.weight.data = expanded_wi.clone().to(dtype=self.dtype, device=device)
-                    self.expansion_down.weight.data = expanded_wo.clone().to(dtype=self.dtype, device=device)
-                
-                # Scale down the copied weights to start with smaller contribution
-                self.expansion_up.weight.data *= 0.01
-                self.expansion_down.weight.data *= 0.01
-            else:
-                # Fallback to zero initialization if we can't copy
-                torch.nn.init.zeros_(self.expansion_up.weight)
-                torch.nn.init.zeros_(self.expansion_down.weight)
+        # Optional: small MLP for more capacity, but start disabled
+        self.use_mlp = expansion_size > 0
+        if self.use_mlp:
+            self.expansion_mlp = torch.nn.Sequential(
+                torch.nn.Linear(input_dim, expansion_size // 4, bias=False, dtype=self.dtype, device=device),
+                torch.nn.ReLU(),
+                torch.nn.Dropout(0.1),
+                torch.nn.Linear(expansion_size // 4, output_dim, bias=False, dtype=self.dtype, device=device)
+            )
+            
+            # Initialize MLP to output zeros
+            with torch.no_grad():
+                for layer in self.expansion_mlp:
+                    if hasattr(layer, 'weight'):
+                        torch.nn.init.zeros_(layer.weight)
         
-        # Very simple learnable gate that starts at zero - ENSURE CORRECT DTYPE AND DEVICE
-        self.gate = torch.nn.Parameter(torch.zeros(1, dtype=self.dtype, device=device))
+        # Gate that starts at zero (completely disabled)
+        self.gate = torch.nn.Parameter(torch.tensor(-10.0, dtype=self.dtype, device=device))  # sigmoid(-10) ≈ 0
         
-        log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
+        log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size//4 if self.use_mlp else 0} -> {output_dim} on {device} ({self.dtype})")
         
     def forward(self, x):
         # Original FFN output (frozen)
         with torch.no_grad():
             original_out = self.original_ffn(x)
         
-        # Expansion path (trainable) - starts with copied weights scaled down
-        expanded = self.expansion_up(x)
-        expanded = self.expansion_act(expanded)
-        expanded = self.expansion_dropout(expanded)
-        expanded = self.expansion_down(expanded)
+        # Start with just the residual (simplest possible expansion)
+        expansion = self.expansion_residual
         
-        # Ensure expansion output matches original output dtype and device
-        expanded = expanded.to(dtype=original_out.dtype, device=original_out.device)
+        # Optionally add MLP contribution
+        if self.use_mlp:
+            mlp_out = self.expansion_mlp(x)
+            expansion = expansion + mlp_out
         
-        # Apply very conservative gating (sigmoid to keep between 0 and 1)
-        # Ensure gate is same dtype as the tensors
-        gate_value = torch.sigmoid(self.gate.to(dtype=original_out.dtype)) * 0.01  # Start with max 1% contribution
-        gated_expansion = gate_value * expanded
+        # Ensure expansion matches original output shape and dtype
+        if expansion.dim() == 1 and original_out.dim() > 1:
+            # Broadcast residual to match batch dimensions
+            expansion = expansion.unsqueeze(0).expand_as(original_out)
         
-        # Simple addition - should be stable since we copied known-good weights
+        expansion = expansion.to(dtype=original_out.dtype, device=original_out.device)
+        
+        # Apply gate (starts near zero, can gradually increase)
+        gate_value = torch.sigmoid(self.gate.to(dtype=original_out.dtype)) * 0.001  # Max 0.1% contribution
+        gated_expansion = gate_value * expansion
+        
+        # Simple addition
         result = original_out + gated_expansion
         
         return result
@@ -326,12 +314,22 @@ class FFNExpansionContinualLearner:
         expansion_state = {}
         for name, module in model.named_modules():
             if isinstance(module, ExpandedFFN):
-                expansion_state[name] = {
-                    'expansion_up.weight': module.expansion_up.weight.data,
-                    'expansion_down.weight': module.expansion_down.weight.data,
+                state = {
+                    'expansion_residual': module.expansion_residual.data,
                     'gate': module.gate.data,
-                    'expansion_size': module.expansion_size
+                    'expansion_size': module.expansion_size,
+                    'use_mlp': module.use_mlp
                 }
+                
+                # Save MLP weights if present
+                if module.use_mlp:
+                    mlp_weights = []
+                    for layer in module.expansion_mlp:
+                        if hasattr(layer, 'weight'):
+                            mlp_weights.append(layer.weight.data)
+                    state['expansion_mlp_weights'] = mlp_weights
+                
+                expansion_state[name] = state
         
         # Save expansion parameters
         torch.save(expansion_state, os.path.join(save_dir, 'expansion_weights.pt'))
@@ -367,13 +365,19 @@ class FFNExpansionContinualLearner:
         
         for name, module in expanded_model.named_modules():
             if isinstance(module, ExpandedFFN) and name in expansion_state:
-                module.expansion_up.weight.data = expansion_state[name]['expansion_up.weight']
-                module.expansion_down.weight.data = expansion_state[name]['expansion_down.weight']
-                if 'gate' in expansion_state[name]:
-                    module.gate.data = expansion_state[name]['gate']
-                elif 'expansion_scale' in expansion_state[name]:
-                    # Backward compatibility
-                    module.gate.data = expansion_state[name]['expansion_scale']
+                state = expansion_state[name]
+                module.expansion_residual.data = state['expansion_residual']
+                module.gate.data = state['gate']
+                module.use_mlp = state.get('use_mlp', False)
+                
+                # Load MLP weights if present
+                if module.use_mlp and 'expansion_mlp_weights' in state:
+                    mlp_weights = state['expansion_mlp_weights']
+                    weight_idx = 0
+                    for layer in module.expansion_mlp:
+                        if hasattr(layer, 'weight') and weight_idx < len(mlp_weights):
+                            layer.weight.data = mlp_weights[weight_idx]
+                            weight_idx += 1
         
         return expanded_model
         
