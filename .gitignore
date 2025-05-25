@@ -16,6 +16,7 @@ lora_javascript/
 adapters/
 checkpoints/
 models/
+__pycache__/
 
 # Hybrid experiment results
 hybrid_lora_full_layer_experiment/experiment_1_results/
@@ -38,3 +39,5 @@ datasets/
 
 # Hugging Face cache
 .cache/huggingface/
+
+*.pyc
