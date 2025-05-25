@@ -174,6 +174,9 @@ class HybridLoRAFullLayerLearner:
             model_with_layer = add_trainable_transformer_layer(base_model)
             log_message(f"Created new full layer for {task_name}")
         
+        # Count parameters before LoRA
+        pre_lora_trainable = sum(p.numel() for p in model_with_layer.parameters() if p.requires_grad)
+        
         # Configure LoRA
         lora_config = LoraConfig(
             r=16,
@@ -186,12 +189,12 @@ class HybridLoRAFullLayerLearner:
         # Apply LoRA to the model with full layer
         hybrid_model = get_peft_model(model_with_layer, lora_config)
         
-        # Count trainable parameters
-        lora_params = sum(p.numel() for n, p in hybrid_model.named_parameters() if 'lora' in n and p.requires_grad)
-        layer_params = sum(p.numel() for n, p in hybrid_model.named_parameters() if 'lora' not in n and p.requires_grad)
+        # Count trainable parameters after LoRA
         total_trainable = sum(p.numel() for p in hybrid_model.parameters() if p.requires_grad)
+        lora_params = sum(p.numel() for n, p in hybrid_model.named_parameters() if 'lora' in n and p.requires_grad)
+        full_layer_params = pre_lora_trainable  # Parameters from the added transformer layer
         
-        log_message(f"Hybrid model for {task_name}: LoRA={lora_params:,}, Full Layer={layer_params:,}, Total={total_trainable:,}")
+        log_message(f"Hybrid model for {task_name}: LoRA={lora_params:,}, Full Layer={full_layer_params:,}, Total={total_trainable:,}")
         
         return hybrid_model
         
@@ -527,8 +530,6 @@ def main():
     # Initialize components
     model_name = "Salesforce/codet5-small"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    learner = HybridLoRAFullLayerLearner(model_name, tokenizer, device)
-    learner.prepare_model()
     
     # Load data
     python_train, python_val, js_train, js_val = load_and_prepare_data()
@@ -537,10 +538,21 @@ def main():
     seed = 42
     
     # Experiment 1: Task-specific components
-    exp1_results = run_experiment_1_task_specific(learner, python_train, python_val, js_train, js_val, seed)
+    log_message("Initializing learner for Experiment 1...")
+    learner1 = HybridLoRAFullLayerLearner(model_name, tokenizer, device)
+    learner1.prepare_model()
+    exp1_results = run_experiment_1_task_specific(learner1, python_train, python_val, js_train, js_val, seed)
     
-    # Experiment 2: Shared full layer
-    exp2_results = run_experiment_2_shared_layer(learner, python_train, python_val, js_train, js_val, seed)
+    # Clean up experiment 1 resources
+    del learner1
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()  # Clear GPU memory
+    
+    # Experiment 2: Shared full layer (start fresh)
+    log_message("Initializing fresh learner for Experiment 2...")
+    learner2 = HybridLoRAFullLayerLearner(model_name, tokenizer, device)
+    learner2.prepare_model()
+    exp2_results = run_experiment_2_shared_layer(learner2, python_train, python_val, js_train, js_val, seed)
     
     # Compare results
     log_message("\n=== COMPARISON ANALYSIS ===")
