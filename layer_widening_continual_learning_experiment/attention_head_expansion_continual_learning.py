@@ -148,7 +148,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         self.dropout = torch.nn.Dropout(0.1)
         
         # Gate to control contribution of new heads (start disabled)
-        self.gate = torch.nn.Parameter(torch.tensor(-10.0, dtype=self.dtype, device=device))  # sigmoid(-10) ≈ 0.000045
+        self.gate = torch.nn.Parameter(torch.tensor(-5.0, dtype=self.dtype, device=device))  # sigmoid(-5) ≈ 0.0067
         
         # Initialize new head weights conservatively
         with torch.no_grad():
@@ -188,14 +188,14 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 self.new_o_proj.weight.data = tiled_o.clone()
             
             # Scale down the copied weights to start with smaller contribution
-            scale_factor = 0.1  # Start with 10% of original magnitude
+            scale_factor = 0.3  # Start with 30% of original magnitude (increased from 10%)
             self.new_q_proj.weight.data *= scale_factor
             self.new_k_proj.weight.data *= scale_factor
             self.new_v_proj.weight.data *= scale_factor
             self.new_o_proj.weight.data *= scale_factor
             
             # Add small random noise for diversity
-            noise_std = 0.001
+            noise_std = 0.01  # Increased noise for better gradient flow
             self.new_q_proj.weight.data += torch.randn_like(self.new_q_proj.weight.data) * noise_std
             self.new_k_proj.weight.data += torch.randn_like(self.new_k_proj.weight.data) * noise_std
             self.new_v_proj.weight.data += torch.randn_like(self.new_v_proj.weight.data) * noise_std
@@ -319,7 +319,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         new_attention_output = self.new_o_proj(new_attention_output)
         
         # Apply gate to control contribution
-        gate_value = torch.sigmoid(self.gate) * 0.01  # Max 1% contribution initially
+        gate_value = torch.sigmoid(self.gate) * 0.1  # Max 10% contribution (increased from 1%)
         gated_new_output = gate_value * new_attention_output
         
         # Combine original and new attention outputs
@@ -427,9 +427,16 @@ class AttentionHeadExpansionContinualLearner:
         
     def prepare_model(self) -> None:
         """Initialize the base model"""
+        # Force float32 on CUDA to avoid overflow issues
+        if device == "cuda":
+            torch_dtype = torch.float32
+            log_message("Using float32 on CUDA to prevent overflow")
+        else:
+            torch_dtype = torch.float32
+        
         self.base_model = T5ForConditionalGeneration.from_pretrained(
             self.model_name, 
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            torch_dtype=torch_dtype
         ).to(self.device)
         
         log_message(f"Loaded base model: {self.model_name}")
@@ -638,8 +645,11 @@ class AttentionHeadExpansionContinualLearner:
                         log_message(f"Warning: Invalid gradients detected, skipping batch {i//batch_size + 1}")
                         continue
                     
-                    # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                    # Very aggressive gradient clipping for attention heads to prevent overflow
+                    if device == "cuda":
+                        torch.nn.utils.clip_grad_norm_(trainable_params, 0.1)  # Very conservative on CUDA
+                    else:
+                        torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)  # Normal clipping on other devices
                     
                     optimizer.step()
                     scheduler.step()
