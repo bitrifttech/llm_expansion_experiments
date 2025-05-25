@@ -12,6 +12,9 @@ from ffn_expansion_continual_learning import (
     log_message, device
 )
 
+# Import ModelAnalyzer
+from utils.model_analyzer import ModelAnalyzer, analyze_model
+
 def test_expanded_ffn():
     """Test the ExpandedFFN module"""
     log_message("Testing ExpandedFFN module...")
@@ -75,24 +78,19 @@ def test_model_expansion():
     model_name = "Salesforce/codet5-small"
     model = T5ForConditionalGeneration.from_pretrained(model_name).to(device)
     
-    # Count original parameters
-    original_params = sum(p.numel() for p in model.parameters())
-    log_message(f"Original model parameters: {original_params:,}")
+    # Analyze original model
+    original_analyzer = ModelAnalyzer(model, "Original T5-Small")
+    original_analysis = original_analyzer.analyze(detailed=False)
     
     # Expand the model
     expanded_model = expand_model_ffn(model, expansion_size=256)  # Smaller for testing
     
-    # Count expanded parameters
+    # Verify that original parameters are frozen
     total_params = sum(p.numel() for p in expanded_model.parameters())
     trainable_params = sum(p.numel() for p in expanded_model.parameters() if p.requires_grad)
     frozen_params = total_params - trainable_params
     
-    log_message(f"Expanded model total parameters: {total_params:,}")
-    log_message(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
-    log_message(f"Frozen parameters: {frozen_params:,} ({frozen_params/total_params*100:.2f}%)")
-    
-    # Verify that original parameters are frozen
-    assert frozen_params == original_params, f"Frozen params {frozen_params} should equal original {original_params}"
+    assert frozen_params == original_analysis.total_parameters, f"Frozen params {frozen_params} should equal original {original_analysis.total_parameters}"
     
     # Test forward pass
     tokenizer = AutoTokenizer.from_pretrained(model_name)

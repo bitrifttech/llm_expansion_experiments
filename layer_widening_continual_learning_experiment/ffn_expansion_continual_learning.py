@@ -22,6 +22,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for model analyzer
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.model_analyzer import ModelAnalyzer, analyze_model
+
 # Set random seeds for reproducibility
 def set_seed(seed: int):
     random.seed(seed)
@@ -178,6 +182,11 @@ class ExpandedFFN(torch.nn.Module):
 
 def expand_model_ffn(model, expansion_size: int = 512):
     """Expand all FFN layers in the model with additional trainable parameters"""
+    log_message(f"Starting FFN expansion with size {expansion_size}...")
+    
+    # Analyze original model
+    original_analyzer = ModelAnalyzer(model, f"Original Model")
+    
     expanded_model = deepcopy(model)
     
     # Get the device from the model
@@ -209,12 +218,11 @@ def expand_model_ffn(model, expansion_size: int = 512):
             expansion_count += 1
             log_message(f"Expanded decoder layer {layer_idx} FFN")
     
-    # Count trainable parameters
-    trainable_params = sum(p.numel() for p in expanded_model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in expanded_model.parameters())
-    
     log_message(f"FFN Expansion complete: {expansion_count} layers expanded")
-    log_message(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params*100:.2f}%)")
+    
+    # Analyze expanded model and compare
+    expanded_analyzer = ModelAnalyzer(expanded_model, f"FFN Expanded Model (size={expansion_size})")
+    comparison = original_analyzer.compare_with(expanded_analyzer, "FFN Expansion")
     
     return expanded_model
 
@@ -237,8 +245,10 @@ class FFNExpansionContinualLearner:
         ).to(self.device)
         
         log_message(f"Loaded base model: {self.model_name}")
-        total_params = sum(p.numel() for p in self.base_model.parameters())
-        log_message(f"Base model parameters: {total_params:,}")
+        
+        # Analyze base model with ModelAnalyzer
+        base_analyzer = ModelAnalyzer(self.base_model, f"{self.model_name} (Base)")
+        self.base_analysis = base_analyzer.analyze(detailed=True)
         
     def train_task(self, train_data, task_name: str, epochs: int = 2, batch_size: int = 8) -> float:
         """Train on a specific task using FFN expansion"""
@@ -584,8 +594,11 @@ def run_ffn_expansion_experiment(model_name: str, tokenizer, python_train, pytho
     
     # Calculate expansion parameters
     expanded_model = expand_model_ffn(learner.base_model, expansion_size)
-    expansion_params = sum(p.numel() for p in expanded_model.parameters() if p.requires_grad)
-    expansion_percentage = expansion_params / base_params * 100
+    expanded_analyzer = ModelAnalyzer(expanded_model, "Final Expanded Model")
+    expanded_analysis = expanded_analyzer.analyze(detailed=False)
+    
+    expansion_params = expanded_analysis.trainable_parameters
+    expansion_percentage = expanded_analysis.efficiency_metrics['trainable_percentage']
     
     # Calculate continual learning metrics
     cl_metrics = calculate_continual_learning_metrics(
