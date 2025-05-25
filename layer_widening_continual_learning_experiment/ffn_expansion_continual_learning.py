@@ -147,8 +147,12 @@ class ExpandedFFN(torch.nn.Module):
             param.requires_grad = False
         
         # Get input dimension from original FFN
-        # T5 FFN structure: wi_0, wi_1 (input projections), wo (output projection)
-        if hasattr(original_ffn, 'wi_0'):
+        # T5-small FFN structure: wi (input projection), wo (output projection)
+        if hasattr(original_ffn, 'wi'):
+            input_dim = original_ffn.wi.in_features
+            output_dim = original_ffn.wo.out_features
+        elif hasattr(original_ffn, 'wi_0'):
+            # For larger T5 models that use gated FFN
             input_dim = original_ffn.wi_0.in_features
             output_dim = original_ffn.wo.out_features
         else:
@@ -156,18 +160,20 @@ class ExpandedFFN(torch.nn.Module):
             input_dim = 512  # T5-small default
             output_dim = 512
         
-        # Add expansion to intermediate layer (parallel to original)
+        # Add expansion path (parallel to original)
         self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype)
         self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype)
-        self.activation = torch.nn.ReLU()  # Use ReLU like T5
+        self.expansion_dropout = torch.nn.Dropout(0.1)
+        self.expansion_act = torch.nn.ReLU()
         
         # Move expansion modules to correct device
         self.expansion_up = self.expansion_up.to(device)
         self.expansion_down = self.expansion_down.to(device)
+        self.expansion_dropout = self.expansion_dropout.to(device)
         
-        # Initialize expansion weights with small values
-        torch.nn.init.normal_(self.expansion_up.weight, std=0.02)
-        torch.nn.init.normal_(self.expansion_down.weight, std=0.02)
+        # Initialize expansion weights with small values to start near identity
+        torch.nn.init.normal_(self.expansion_up.weight, std=0.01)
+        torch.nn.init.normal_(self.expansion_down.weight, std=0.01)
         
         log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
         
@@ -175,13 +181,17 @@ class ExpandedFFN(torch.nn.Module):
         # Original FFN output (frozen)
         original_out = self.original_ffn(x)
         
-        # Expansion path (trainable)
+        # Expansion path (trainable) - start small to avoid disrupting training
         expanded = self.expansion_up(x)
-        expanded = self.activation(expanded)
+        expanded = self.expansion_act(expanded)
+        expanded = self.expansion_dropout(expanded)
         expanded = self.expansion_down(expanded)
         
-        # Combine with residual connection
-        return original_out + expanded
+        # Ensure expansion output matches original output dtype
+        expanded = expanded.to(original_out.dtype)
+        
+        # Combine with residual connection (scale down expansion initially)
+        return original_out + 0.1 * expanded
 
 def expand_model_ffn(model, expansion_size: int = 512):
     """Expand all FFN layers in the model with additional trainable parameters"""
@@ -266,13 +276,65 @@ class FFNExpansionContinualLearner:
         # Store the trained model
         self.task_models[task_name] = expanded_model
         
-        # Save model
-        save_dir = f"ffn_expansion_{task_name}"
-        os.makedirs(save_dir, exist_ok=True)
-        expanded_model.save_pretrained(save_dir)
+        # Save model with custom handling for ExpandedFFN
+        self._save_expanded_model(expanded_model, task_name)
         
         log_message(f"Task {task_name} training completed in {training_time:.2f} minutes")
         return training_time
+        
+    def _save_expanded_model(self, model, task_name: str):
+        """Save expanded model with custom ExpandedFFN handling"""
+        save_dir = f"ffn_expansion_{task_name}"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Save only the expansion parameters (trainable parts)
+        expansion_state = {}
+        for name, module in model.named_modules():
+            if isinstance(module, ExpandedFFN):
+                expansion_state[name] = {
+                    'expansion_up.weight': module.expansion_up.weight.data,
+                    'expansion_down.weight': module.expansion_down.weight.data,
+                    'expansion_size': module.expansion_size
+                }
+        
+        # Save expansion parameters
+        torch.save(expansion_state, os.path.join(save_dir, 'expansion_weights.pt'))
+        
+        # Save model config for reconstruction
+        config = {
+            'model_name': self.model_name,
+            'expansion_size': self.expansion_size,
+            'device': self.device
+        }
+        torch.save(config, os.path.join(save_dir, 'config.pt'))
+        
+        log_message(f"Saved expansion weights to {save_dir}")
+        
+    def _load_expanded_model(self, task_name: str):
+        """Load expanded model with custom ExpandedFFN handling"""
+        save_dir = f"ffn_expansion_{task_name}"
+        
+        # Load config
+        config = torch.load(os.path.join(save_dir, 'config.pt'))
+        
+        # Create fresh base model
+        base_model = T5ForConditionalGeneration.from_pretrained(
+            config['model_name'],
+            torch_dtype=torch.float16 if config['device'] == "cuda" else torch.float32
+        ).to(config['device'])
+        
+        # Expand the model
+        expanded_model = expand_model_ffn(base_model, config['expansion_size'])
+        
+        # Load expansion weights
+        expansion_state = torch.load(os.path.join(save_dir, 'expansion_weights.pt'))
+        
+        for name, module in expanded_model.named_modules():
+            if isinstance(module, ExpandedFFN) and name in expansion_state:
+                module.expansion_up.weight.data = expansion_state[name]['expansion_up.weight']
+                module.expansion_down.weight.data = expansion_state[name]['expansion_down.weight']
+        
+        return expanded_model
         
     def switch_to_task(self, task_name: str) -> None:
         """Switch to a specific task model"""
@@ -281,10 +343,7 @@ class FFNExpansionContinualLearner:
             save_dir = f"ffn_expansion_{task_name}"
             if os.path.exists(save_dir):
                 log_message(f"Loading {task_name} model from {save_dir}")
-                self.task_models[task_name] = T5ForConditionalGeneration.from_pretrained(
-                    save_dir,
-                    torch_dtype=torch.float16 if device == "cuda" else torch.float32
-                ).to(self.device)
+                self.task_models[task_name] = self._load_expanded_model(task_name)
             else:
                 raise ValueError(f"Task {task_name} model not found")
         
@@ -296,7 +355,9 @@ class FFNExpansionContinualLearner:
             self.switch_to_task(task_name)
         
         model = self.task_models[task_name]
-        return self._evaluate_model(model, eval_data, num_samples, task_name)
+        # Map task name to language for proper evaluation
+        language = "python" if task_name == "python" else "javascript"
+        return self._evaluate_model(model, eval_data, num_samples, language)
         
     def _train_model(self, model, data, epochs: int, batch_size: int) -> float:
         """Train the model on given data"""
@@ -304,7 +365,10 @@ class FFNExpansionContinualLearner:
         
         # Setup optimizer for only trainable parameters
         trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable_params, lr=5e-4, weight_decay=0.01)
+        log_message(f"Training {len(trainable_params)} parameter groups, {sum(p.numel() for p in trainable_params):,} total parameters")
+        
+        # Use more conservative learning rate for expansion training
+        optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01, eps=1e-8)
         
         model.train()
         
@@ -345,12 +409,31 @@ class FFNExpansionContinualLearner:
                 )
                 
                 loss = outputs.loss
+                
+                # Check for NaN loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    log_message(f"Warning: NaN/Inf loss detected, skipping batch {i//batch_size}")
+                    continue
+                
                 epoch_loss += loss.item()
                 num_batches += 1
                 
                 # Backward pass
                 optimizer.zero_grad()
                 loss.backward()
+                
+                # Check for NaN gradients
+                has_nan_grad = False
+                for param in trainable_params:
+                    if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                        has_nan_grad = True
+                        break
+                
+                if has_nan_grad:
+                    log_message(f"Warning: NaN/Inf gradients detected, skipping batch {i//batch_size}")
+                    continue
+                
+                # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
                 optimizer.step()
                 
@@ -359,7 +442,7 @@ class FFNExpansionContinualLearner:
                     torch.cuda.empty_cache()
             
             avg_loss = epoch_loss / num_batches if num_batches > 0 else 0
-            log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}")
+            log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}, Batches: {num_batches}")
         
         training_time = (time.time() - start_time) / 60
         return training_time
@@ -658,9 +741,18 @@ def main():
     # Load data
     python_train, python_val, js_train, js_val = load_and_prepare_data()
     
+    # Use smaller datasets for testing
+    python_train = python_train[:1000]  # Reduced from 8000
+    python_val = python_val[:200]       # Reduced from 2000
+    js_train = js_train[:1000]          # Reduced from 8000
+    js_val = js_val[:200]               # Reduced from 2000
+    
+    log_message(f"Using reduced datasets: Python train={len(python_train)}, val={len(python_val)}")
+    log_message(f"Using reduced datasets: JavaScript train={len(js_train)}, val={len(js_val)}")
+    
     # Run experiment
     seed = 42
-    expansion_size = 512  # 25% increase in FFN intermediate size
+    expansion_size = 256  # Reduced from 512 for faster testing
     
     results = run_ffn_expansion_experiment(
         model_name, tokenizer, python_train, python_val, 
