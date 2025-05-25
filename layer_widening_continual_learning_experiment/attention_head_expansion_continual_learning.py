@@ -104,6 +104,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         self.original_attention = original_attention  # Frozen
         self.num_new_heads = num_new_heads
         self.device = device
+        self.generation_mode = False  # Flag to disable new heads during generation
         
         # Get configuration from original attention
         self.d_model = original_attention.d_model
@@ -229,6 +230,10 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 cache_position=cache_position
             )
         
+        # If in generation mode, return only original output
+        if self.generation_mode:
+            return original_outputs
+        
         # Extract original attention output
         if isinstance(original_outputs, tuple):
             original_attention_output = original_outputs[0]
@@ -352,7 +357,13 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 return original_outputs
             
             # Apply gate to control contribution
-            gate_value = torch.sigmoid(self.gate) * 0.5  # Max 50% contribution (increased from 25%)
+            base_contribution = 0.1  # Max 10% contribution during training
+            
+            # Slightly reduce contribution during inference to prevent generation issues
+            if not self.training:
+                base_contribution = 0.07  # 7% during inference (was 5%)
+            
+            gate_value = torch.sigmoid(self.gate) * base_contribution
             gated_new_output = gate_value * new_attention_output
             
             # Combine original and new attention outputs
@@ -382,6 +393,14 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
             'new_o_grad_norm': self.new_o_proj.weight.grad.norm().item() if self.new_o_proj.weight.grad is not None else 0.0,
         }
         return stats
+    
+    def enable_generation_mode(self):
+        """Enable generation mode (disable new heads)"""
+        self.generation_mode = True
+    
+    def disable_generation_mode(self):
+        """Disable generation mode (enable new heads)"""
+        self.generation_mode = False
 
 def expand_model_attention_heads(model, num_new_heads: int = NUM_NEW_ATTENTION_HEADS):
     """Expand all attention layers in the model with additional trainable heads"""
@@ -450,6 +469,18 @@ def expand_model_attention_heads(model, num_new_heads: int = NUM_NEW_ATTENTION_H
     comparison = original_analyzer.compare_with(expanded_analyzer, "Attention Head Expansion")
     
     return expanded_model
+
+def enable_generation_mode(model):
+    """Enable generation mode for all ExpandedMultiHeadAttention modules"""
+    for module in model.modules():
+        if isinstance(module, ExpandedMultiHeadAttention):
+            module.enable_generation_mode()
+
+def disable_generation_mode(model):
+    """Disable generation mode for all ExpandedMultiHeadAttention modules"""
+    for module in model.modules():
+        if isinstance(module, ExpandedMultiHeadAttention):
+            module.disable_generation_mode()
 
 class AttentionHeadExpansionContinualLearner:
     """Continual learner using attention head expansion approach"""
@@ -683,7 +714,7 @@ class AttentionHeadExpansionContinualLearner:
                         continue
                     
                     # Less aggressive gradient clipping to allow better gradient flow
-                    if device == "cuda":
+                    if self.device == "cuda":
                         torch.nn.utils.clip_grad_norm_(trainable_params, 0.5)  # Increased from 0.1
                     else:
                         torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)  # Normal clipping on other devices
@@ -753,6 +784,9 @@ class AttentionHeadExpansionContinualLearner:
         """Evaluate model performance"""
         model.eval()
         
+        # Enable generation mode to prevent new heads from interfering with generation
+        enable_generation_mode(model)
+        
         # Sample data for evaluation
         eval_data = random.sample(data, min(num_samples, len(data)))
         
@@ -789,13 +823,15 @@ class AttentionHeadExpansionContinualLearner:
                 ).to(self.device)
                 
                 try:
-                    # Generate prediction
+                    # Generate prediction with better parameters to prevent repetitive generation
                     outputs = model.generate(
                         input_ids=input_encoding.input_ids,
                         attention_mask=input_encoding.attention_mask,
-                        max_length=512,
+                        max_length=min(256, len(input_encoding.input_ids[0]) + 100),  # Reasonable max length
                         num_beams=4,
                         early_stopping=True,
+                        repetition_penalty=1.2,  # Prevent repetitive generation
+                        no_repeat_ngram_size=3,  # Prevent 3-gram repetition
                         pad_token_id=self.tokenizer.pad_token_id,
                         eos_token_id=self.tokenizer.eos_token_id
                     )
@@ -864,6 +900,9 @@ class AttentionHeadExpansionContinualLearner:
             
             avg_contribution = total_contribution / len(expanded_attentions)
             log_message(f"Average new head contribution: {avg_contribution:.6f}")
+        
+        # Disable generation mode to restore normal operation
+        disable_generation_mode(model)
         
         return avg_bleu, pass_rate
     
