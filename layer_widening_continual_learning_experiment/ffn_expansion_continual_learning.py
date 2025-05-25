@@ -167,15 +167,10 @@ class ExpandedFFN(torch.nn.Module):
             original_wo_weight = None
         
         # Add expansion path (parallel to original) - copy from original for stability
-        self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype)
-        self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype)
+        self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype, device=device)
+        self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype, device=device)
         self.expansion_dropout = torch.nn.Dropout(0.1)
         self.expansion_act = torch.nn.ReLU()
-        
-        # Move expansion modules to correct device
-        self.expansion_up = self.expansion_up.to(device)
-        self.expansion_down = self.expansion_down.to(device)
-        self.expansion_dropout = self.expansion_dropout.to(device)
         
         # Initialize weights by copying from original FFN for known-good values
         with torch.no_grad():
@@ -185,16 +180,16 @@ class ExpandedFFN(torch.nn.Module):
                 
                 if expansion_size <= original_hidden_dim:
                     # If expansion is smaller, take a subset
-                    self.expansion_up.weight.data = original_wi_weight[:expansion_size, :].clone()
-                    self.expansion_down.weight.data = original_wo_weight[:, :expansion_size].clone()
+                    self.expansion_up.weight.data = original_wi_weight[:expansion_size, :].clone().to(dtype=self.dtype, device=device)
+                    self.expansion_down.weight.data = original_wo_weight[:, :expansion_size].clone().to(dtype=self.dtype, device=device)
                 else:
                     # If expansion is larger, repeat/tile the original weights
                     repeat_factor = (expansion_size + original_hidden_dim - 1) // original_hidden_dim
                     expanded_wi = original_wi_weight.repeat(repeat_factor, 1)[:expansion_size, :]
                     expanded_wo = original_wo_weight.repeat(1, repeat_factor)[:, :expansion_size]
                     
-                    self.expansion_up.weight.data = expanded_wi.clone()
-                    self.expansion_down.weight.data = expanded_wo.clone()
+                    self.expansion_up.weight.data = expanded_wi.clone().to(dtype=self.dtype, device=device)
+                    self.expansion_down.weight.data = expanded_wo.clone().to(dtype=self.dtype, device=device)
                 
                 # Scale down the copied weights to start with smaller contribution
                 self.expansion_up.weight.data *= 0.01
@@ -204,7 +199,7 @@ class ExpandedFFN(torch.nn.Module):
                 torch.nn.init.zeros_(self.expansion_up.weight)
                 torch.nn.init.zeros_(self.expansion_down.weight)
         
-        # Very simple learnable gate that starts at zero
+        # Very simple learnable gate that starts at zero - ENSURE CORRECT DTYPE AND DEVICE
         self.gate = torch.nn.Parameter(torch.zeros(1, dtype=self.dtype, device=device))
         
         log_message(f"Created ExpandedFFN: {input_dim} -> {expansion_size} -> {output_dim} on {device} ({self.dtype})")
@@ -220,11 +215,12 @@ class ExpandedFFN(torch.nn.Module):
         expanded = self.expansion_dropout(expanded)
         expanded = self.expansion_down(expanded)
         
-        # Ensure expansion output matches original output dtype
-        expanded = expanded.to(original_out.dtype)
+        # Ensure expansion output matches original output dtype and device
+        expanded = expanded.to(dtype=original_out.dtype, device=original_out.device)
         
         # Apply very conservative gating (sigmoid to keep between 0 and 1)
-        gate_value = torch.sigmoid(self.gate) * 0.01  # Start with max 1% contribution
+        # Ensure gate is same dtype as the tensors
+        gate_value = torch.sigmoid(self.gate.to(dtype=original_out.dtype)) * 0.01  # Start with max 1% contribution
         gated_expansion = gate_value * expanded
         
         # Simple addition - should be stable since we copied known-good weights
