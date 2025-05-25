@@ -772,6 +772,14 @@ class AttentionHeadExpansionContinualLearner:
                     # Decode prediction
                     predicted_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
                     
+                    # DEBUG: Print first few examples to see what's being generated
+                    if len(bleu_scores) < 3:  # Only print first 3 examples
+                        log_message(f"DEBUG Example {len(bleu_scores) + 1}:")
+                        log_message(f"  Input: {input_text[:100]}...")
+                        log_message(f"  Target: {target_text[:100]}...")
+                        log_message(f"  Predicted: {predicted_text[:100]}...")
+                        log_message(f"  Predicted length: {len(predicted_text)}")
+                    
                     # Calculate BLEU score
                     reference = target_text.split()
                     candidate = predicted_text.split()
@@ -780,18 +788,40 @@ class AttentionHeadExpansionContinualLearner:
                         smoothing = SmoothingFunction().method1
                         bleu = sentence_bleu([reference], candidate, smoothing_function=smoothing)
                         bleu_scores.append(bleu)
+                        
+                        # DEBUG: Print BLEU calculation details for first few examples
+                        if len(bleu_scores) <= 3:
+                            log_message(f"  Reference tokens: {len(reference)}, Candidate tokens: {len(candidate)}")
+                            log_message(f"  BLEU score: {bleu:.4f}")
+                    else:
+                        # DEBUG: Log why BLEU wasn't calculated
+                        if len(bleu_scores) < 3:
+                            log_message(f"  SKIPPED: Reference tokens: {len(reference)}, Candidate tokens: {len(candidate)}")
                     
                     # Check functional correctness for code
                     if language and self._is_functionally_correct(predicted_text, target_text, language):
                         correct_predictions += 1
                         
                 except Exception as e:
-                    # Skip problematic samples
+                    # DEBUG: Log exceptions
+                    if len(bleu_scores) < 3:
+                        log_message(f"  EXCEPTION: {str(e)}")
                     continue
         
         # Calculate metrics
         avg_bleu = np.mean(bleu_scores) if bleu_scores else 0.0
         pass_rate = (correct_predictions / total_predictions) * 100 if total_predictions > 0 else 0.0
+        
+        # DEBUG: Print evaluation statistics
+        log_message(f"=== EVALUATION STATISTICS ===")
+        log_message(f"Total samples processed: {total_predictions}")
+        log_message(f"Valid BLEU scores: {len(bleu_scores)}")
+        log_message(f"Functional correct: {correct_predictions}")
+        log_message(f"Average BLEU: {avg_bleu:.4f}")
+        log_message(f"Pass rate: {pass_rate:.2f}%")
+        if len(bleu_scores) > 0:
+            log_message(f"BLEU score range: {min(bleu_scores):.4f} - {max(bleu_scores):.4f}")
+        log_message(f"================================")
         
         # Final verification of contribution
         if len(expanded_attentions) > 0:
