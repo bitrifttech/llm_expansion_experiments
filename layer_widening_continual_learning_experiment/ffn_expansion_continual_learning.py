@@ -151,16 +151,22 @@ class ExpandedFFN(torch.nn.Module):
         if hasattr(original_ffn, 'wi'):
             input_dim = original_ffn.wi.in_features
             output_dim = original_ffn.wo.out_features
+            original_wi_weight = original_ffn.wi.weight.data
+            original_wo_weight = original_ffn.wo.weight.data
         elif hasattr(original_ffn, 'wi_0'):
             # For larger T5 models that use gated FFN
             input_dim = original_ffn.wi_0.in_features
             output_dim = original_ffn.wo.out_features
+            original_wi_weight = original_ffn.wi_0.weight.data
+            original_wo_weight = original_ffn.wo.weight.data
         else:
             # Fallback for different FFN structures
             input_dim = 512  # T5-small default
             output_dim = 512
+            original_wi_weight = None
+            original_wo_weight = None
         
-        # Add expansion path (parallel to original) - much simpler approach
+        # Add expansion path (parallel to original) - copy from original for stability
         self.expansion_up = torch.nn.Linear(input_dim, expansion_size, bias=False, dtype=self.dtype)
         self.expansion_down = torch.nn.Linear(expansion_size, output_dim, bias=False, dtype=self.dtype)
         self.expansion_dropout = torch.nn.Dropout(0.1)
@@ -171,10 +177,32 @@ class ExpandedFFN(torch.nn.Module):
         self.expansion_down = self.expansion_down.to(device)
         self.expansion_dropout = self.expansion_dropout.to(device)
         
-        # Initialize weights to ZERO for maximum stability
+        # Initialize weights by copying from original FFN for known-good values
         with torch.no_grad():
-            torch.nn.init.zeros_(self.expansion_up.weight)
-            torch.nn.init.zeros_(self.expansion_down.weight)
+            if original_wi_weight is not None and original_wo_weight is not None:
+                # Copy a subset of the original weights to match our expansion size
+                original_hidden_dim = original_wi_weight.shape[0]  # Usually 2048 for T5-small
+                
+                if expansion_size <= original_hidden_dim:
+                    # If expansion is smaller, take a subset
+                    self.expansion_up.weight.data = original_wi_weight[:expansion_size, :].clone()
+                    self.expansion_down.weight.data = original_wo_weight[:, :expansion_size].clone()
+                else:
+                    # If expansion is larger, repeat/tile the original weights
+                    repeat_factor = (expansion_size + original_hidden_dim - 1) // original_hidden_dim
+                    expanded_wi = original_wi_weight.repeat(repeat_factor, 1)[:expansion_size, :]
+                    expanded_wo = original_wo_weight.repeat(1, repeat_factor)[:, :expansion_size]
+                    
+                    self.expansion_up.weight.data = expanded_wi.clone()
+                    self.expansion_down.weight.data = expanded_wo.clone()
+                
+                # Scale down the copied weights to start with smaller contribution
+                self.expansion_up.weight.data *= 0.01
+                self.expansion_down.weight.data *= 0.01
+            else:
+                # Fallback to zero initialization if we can't copy
+                torch.nn.init.zeros_(self.expansion_up.weight)
+                torch.nn.init.zeros_(self.expansion_down.weight)
         
         # Very simple learnable gate that starts at zero
         self.gate = torch.nn.Parameter(torch.zeros(1, dtype=self.dtype, device=device))
@@ -186,7 +214,7 @@ class ExpandedFFN(torch.nn.Module):
         with torch.no_grad():
             original_out = self.original_ffn(x)
         
-        # Expansion path (trainable) - starts at zero contribution
+        # Expansion path (trainable) - starts with copied weights scaled down
         expanded = self.expansion_up(x)
         expanded = self.expansion_act(expanded)
         expanded = self.expansion_dropout(expanded)
@@ -196,10 +224,10 @@ class ExpandedFFN(torch.nn.Module):
         expanded = expanded.to(original_out.dtype)
         
         # Apply very conservative gating (sigmoid to keep between 0 and 1)
-        gate_value = torch.sigmoid(self.gate) * 0.1  # Max 10% contribution
+        gate_value = torch.sigmoid(self.gate) * 0.01  # Start with max 1% contribution
         gated_expansion = gate_value * expanded
         
-        # Simple addition - no clamping needed since we start from zero
+        # Simple addition - should be stable since we copied known-good weights
         result = original_out + gated_expansion
         
         return result
