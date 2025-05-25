@@ -66,10 +66,29 @@ def log_message(message: str, level: str = "INFO"):
 def freeze_base_model(model):
     """Freeze all parameters in the base model"""
     frozen_count = 0
+    trainable_count = 0
+    
     for name, param in model.named_parameters():
-        param.requires_grad = False
-        frozen_count += 1
-    log_message(f"Froze {frozen_count} base model parameters")
+        # Keep new attention head parameters trainable
+        if 'new_q_proj' in name or 'new_k_proj' in name or 'new_v_proj' in name or 'new_o_proj' in name or 'gate' in name:
+            param.requires_grad = True
+            trainable_count += 1
+        else:
+            param.requires_grad = False
+            frozen_count += 1
+    
+    log_message(f"Froze {frozen_count} base model parameters, kept {trainable_count} expansion parameters trainable")
+    
+    # Verification: Double-check freezing worked
+    actual_frozen = sum(1 for p in model.parameters() if not p.requires_grad)
+    actual_trainable = sum(1 for p in model.parameters() if p.requires_grad)
+    
+    log_message(f"Verification: {actual_frozen} frozen, {actual_trainable} trainable parameters")
+    
+    if actual_trainable == 0:
+        log_message("WARNING: No trainable parameters found after freezing!")
+    
+    return actual_frozen, actual_trainable
 
 class ExpandedMultiHeadAttention(torch.nn.Module):
     """Multi-head attention with additional trainable heads"""
@@ -141,23 +160,24 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         
         log_message(f"Created ExpandedMultiHeadAttention: {self.num_original_heads} original + {num_new_heads} new heads on {device} ({self.dtype})")
     
-    def forward(self, hidden_states, attention_mask=None, key_value_states=None, 
+    def forward(self, hidden_states, mask=None, key_value_states=None, 
                 position_bias=None, past_key_value=None, layer_head_mask=None, 
-                query_length=None, use_cache=False, output_attentions=False):
+                query_length=None, use_cache=False, output_attentions=False, cache_position=None):
         """Forward pass with original + new attention heads"""
         
         # Original attention output (frozen)
         with torch.no_grad():
             original_outputs = self.original_attention(
                 hidden_states=hidden_states,
-                attention_mask=attention_mask,
+                mask=mask,
                 key_value_states=key_value_states,
                 position_bias=position_bias,
                 past_key_value=past_key_value,
                 layer_head_mask=layer_head_mask,
                 query_length=query_length,
                 use_cache=use_cache,
-                output_attentions=output_attentions
+                output_attentions=output_attentions,
+                cache_position=cache_position
             )
         
         # Extract original attention output
@@ -186,9 +206,9 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         scores = torch.matmul(new_q, new_k.transpose(-2, -1)) / np.sqrt(self.d_kv)
         
         # Apply attention mask if provided
-        if attention_mask is not None:
+        if mask is not None:
             # Expand mask for new heads
-            expanded_mask = attention_mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
+            expanded_mask = mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
             scores = scores.masked_fill(expanded_mask == 0, -1e9)
         
         # Apply position bias if provided (T5 relative attention)
@@ -220,6 +240,21 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
             return (combined_output,) + original_outputs[1:]
         else:
             return combined_output
+    
+    def get_training_stats(self):
+        """Get statistics about the new attention heads for verification"""
+        stats = {
+            'gate_value': torch.sigmoid(self.gate).item(),
+            'new_q_weight_norm': self.new_q_proj.weight.norm().item(),
+            'new_k_weight_norm': self.new_k_proj.weight.norm().item(),
+            'new_v_weight_norm': self.new_v_proj.weight.norm().item(),
+            'new_o_weight_norm': self.new_o_proj.weight.norm().item(),
+            'new_q_grad_norm': self.new_q_proj.weight.grad.norm().item() if self.new_q_proj.weight.grad is not None else 0.0,
+            'new_k_grad_norm': self.new_k_proj.weight.grad.norm().item() if self.new_k_proj.weight.grad is not None else 0.0,
+            'new_v_grad_norm': self.new_v_proj.weight.grad.norm().item() if self.new_v_proj.weight.grad is not None else 0.0,
+            'new_o_grad_norm': self.new_o_proj.weight.grad.norm().item() if self.new_o_proj.weight.grad is not None else 0.0,
+        }
+        return stats
 
 def expand_model_attention_heads(model, num_new_heads: int = 4):
     """Expand all attention layers in the model with additional trainable heads"""
@@ -233,10 +268,7 @@ def expand_model_attention_heads(model, num_new_heads: int = 4):
     # Get the device from the model
     model_device = next(model.parameters()).device
     
-    # Freeze all original parameters
-    freeze_base_model(expanded_model)
-    
-    # Replace attention layers with expanded versions
+    # Replace attention layers with expanded versions FIRST
     expansion_count = 0
     
     # Expand encoder self-attention layers
@@ -269,6 +301,22 @@ def expand_model_attention_heads(model, num_new_heads: int = 4):
             log_message(f"Expanded decoder layer {layer_idx} cross-attention")
     
     log_message(f"Attention Head Expansion complete: {expansion_count} attention layers expanded")
+    
+    # NOW freeze all original parameters (after expansion is complete)
+    frozen_count, trainable_count = freeze_base_model(expanded_model)
+    
+    # Verify the expansion worked correctly
+    total_new_heads = expansion_count * num_new_heads
+    log_message(f"Total new attention heads added: {total_new_heads}")
+    
+    # Count trainable parameters in new heads
+    new_head_params = 0
+    for name, module in expanded_model.named_modules():
+        if isinstance(module, ExpandedMultiHeadAttention):
+            module_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            new_head_params += module_params
+    
+    log_message(f"Trainable parameters in new heads: {new_head_params:,}")
     
     # Analyze expanded model and compare
     expanded_analyzer = ModelAnalyzer(expanded_model, f"Attention Expanded Model ({num_new_heads} new heads)")
@@ -413,6 +461,10 @@ class AttentionHeadExpansionContinualLearner:
         
         log_message(f"Training {len(trainable_params)} parameter groups, {sum(p.numel() for p in trainable_params):,} total parameters")
         
+        # Verify base model is frozen
+        frozen_params = [p for p in model.parameters() if not p.requires_grad]
+        log_message(f"Verified: {len(frozen_params)} base model parameters are frozen")
+        
         # Conservative optimizer settings
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
         
@@ -422,6 +474,14 @@ class AttentionHeadExpansionContinualLearner:
         )
         
         model.train()
+        
+        # Collect expanded attention modules for verification
+        expanded_attentions = []
+        for name, module in model.named_modules():
+            if isinstance(module, ExpandedMultiHeadAttention):
+                expanded_attentions.append((name, module))
+        
+        log_message(f"Found {len(expanded_attentions)} ExpandedMultiHeadAttention modules")
         
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -497,6 +557,15 @@ class AttentionHeadExpansionContinualLearner:
                     epoch_loss += loss.item()
                     valid_batches += 1
                     
+                    # Verification: Check that new heads are being trained (every 10 batches)
+                    if valid_batches % 10 == 0 and len(expanded_attentions) > 0:
+                        sample_attention = expanded_attentions[0][1]  # First expanded attention
+                        stats = sample_attention.get_training_stats()
+                        log_message(f"Batch {valid_batches}: Gate={stats['gate_value']:.6f}, "
+                                  f"Q_grad={stats['new_q_grad_norm']:.6f}, "
+                                  f"K_grad={stats['new_k_grad_norm']:.6f}, "
+                                  f"V_grad={stats['new_v_grad_norm']:.6f}")
+                    
                 except Exception as e:
                     log_message(f"Warning: Exception during training batch {i//batch_size + 1}: {str(e)}")
                     continue
@@ -510,12 +579,37 @@ class AttentionHeadExpansionContinualLearner:
             avg_loss = epoch_loss / valid_batches if valid_batches > 0 else float('inf')
             log_message(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}, Valid Batches: {valid_batches}/{num_batches}")
             
+            # Epoch-end verification: Check training progress
+            if len(expanded_attentions) > 0:
+                total_gate_value = 0.0
+                total_weight_change = 0.0
+                for name, attention in expanded_attentions:
+                    stats = attention.get_training_stats()
+                    total_gate_value += stats['gate_value']
+                    total_weight_change += stats['new_q_weight_norm'] + stats['new_k_weight_norm'] + stats['new_v_weight_norm']
+                
+                avg_gate = total_gate_value / len(expanded_attentions)
+                avg_weight_norm = total_weight_change / (len(expanded_attentions) * 3)
+                log_message(f"Epoch {epoch+1} - Avg Gate Value: {avg_gate:.6f}, Avg Weight Norm: {avg_weight_norm:.6f}")
+            
             # Early stopping if loss becomes invalid
             if avg_loss == float('inf') or avg_loss > 15.0:
                 log_message("Warning: Training unstable, stopping early")
                 break
         
         training_time = (time.time() - start_time) / 60
+        
+        # Final verification: Check that training actually happened
+        if len(expanded_attentions) > 0:
+            log_message("=== FINAL TRAINING VERIFICATION ===")
+            for name, attention in expanded_attentions[:3]:  # Show first 3
+                stats = attention.get_training_stats()
+                log_message(f"{name}: Gate={stats['gate_value']:.6f}, "
+                          f"Weights=[Q:{stats['new_q_weight_norm']:.4f}, "
+                          f"K:{stats['new_k_weight_norm']:.4f}, "
+                          f"V:{stats['new_v_weight_norm']:.4f}, "
+                          f"O:{stats['new_o_weight_norm']:.4f}]")
+        
         return training_time
     
     def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Tuple[float, float]:
@@ -528,6 +622,21 @@ class AttentionHeadExpansionContinualLearner:
         bleu_scores = []
         correct_predictions = 0
         total_predictions = len(eval_data)
+        
+        # Verification: Check that new heads are contributing
+        expanded_attentions = []
+        for name, module in model.named_modules():
+            if isinstance(module, ExpandedMultiHeadAttention):
+                expanded_attentions.append((name, module))
+        
+        if len(expanded_attentions) > 0:
+            log_message(f"=== EVALUATION VERIFICATION ===")
+            sample_attention = expanded_attentions[0][1]
+            stats = sample_attention.get_training_stats()
+            log_message(f"New heads status: Gate={stats['gate_value']:.6f}, "
+                      f"Weight norms=[Q:{stats['new_q_weight_norm']:.4f}, "
+                      f"K:{stats['new_k_weight_norm']:.4f}, "
+                      f"V:{stats['new_v_weight_norm']:.4f}]")
         
         with torch.no_grad():
             for item in eval_data:
@@ -577,6 +686,17 @@ class AttentionHeadExpansionContinualLearner:
         # Calculate metrics
         avg_bleu = np.mean(bleu_scores) if bleu_scores else 0.0
         pass_rate = (correct_predictions / total_predictions) * 100 if total_predictions > 0 else 0.0
+        
+        # Final verification of contribution
+        if len(expanded_attentions) > 0:
+            total_contribution = 0.0
+            for name, attention in expanded_attentions:
+                stats = attention.get_training_stats()
+                contribution = stats['gate_value'] * (stats['new_q_weight_norm'] + stats['new_k_weight_norm'] + stats['new_v_weight_norm']) / 3
+                total_contribution += contribution
+            
+            avg_contribution = total_contribution / len(expanded_attentions)
+            log_message(f"Average new head contribution: {avg_contribution:.6f}")
         
         return avg_bleu, pass_rate
     
