@@ -26,6 +26,12 @@ warnings.filterwarnings("ignore")
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
 
+# ============================================================================
+# EXPERIMENT CONFIGURATION
+# ============================================================================
+NUM_NEW_ATTENTION_HEADS = 1  # Number of new attention heads to add per layer
+# ============================================================================
+
 # Set random seeds for reproducibility
 def set_seed(seed: int):
     random.seed(seed)
@@ -93,7 +99,7 @@ def freeze_base_model(model):
 class ExpandedMultiHeadAttention(torch.nn.Module):
     """Multi-head attention with additional trainable heads"""
     
-    def __init__(self, original_attention, num_new_heads: int = 4, device: str = "cpu"):
+    def __init__(self, original_attention, num_new_heads: int = NUM_NEW_ATTENTION_HEADS, device: str = "cpu"):
         super().__init__()
         self.original_attention = original_attention  # Frozen
         self.num_new_heads = num_new_heads
@@ -346,7 +352,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         }
         return stats
 
-def expand_model_attention_heads(model, num_new_heads: int = 4):
+def expand_model_attention_heads(model, num_new_heads: int = NUM_NEW_ATTENTION_HEADS):
     """Expand all attention layers in the model with additional trainable heads"""
     log_message(f"Starting attention head expansion with {num_new_heads} new heads per layer...")
     
@@ -417,7 +423,7 @@ def expand_model_attention_heads(model, num_new_heads: int = 4):
 class AttentionHeadExpansionContinualLearner:
     """Continual learner using attention head expansion approach"""
     
-    def __init__(self, model_name: str, tokenizer, device: str, num_new_heads: int = 4):
+    def __init__(self, model_name: str, tokenizer, device: str, num_new_heads: int = NUM_NEW_ATTENTION_HEADS):
         self.model_name = model_name
         self.tokenizer = tokenizer
         self.device = device
@@ -886,16 +892,16 @@ def run_attention_head_expansion_experiment():
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     log_message("=== ATTENTION HEAD EXPANSION CONTINUAL LEARNING EXPERIMENT ===")
-    log_message(f"New attention heads per layer: 4")
+    log_message(f"New attention heads per layer: {NUM_NEW_ATTENTION_HEADS}")
     
     # Initialize learner
-    learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=1)
+    learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=NUM_NEW_ATTENTION_HEADS)
     learner.prepare_model()
     
     # Track experiment results
     results = {
         'approach': 'attention_head_expansion',
-        'num_new_heads': 4,
+        'num_new_heads': NUM_NEW_ATTENTION_HEADS,
         'model_name': model_name,
         'device': device,
         'training_times': {},
@@ -922,7 +928,7 @@ def run_attention_head_expansion_experiment():
     log_message("Phase 2: Training on JavaScript (fresh model)...")
     
     # Create fresh learner for JavaScript
-    js_learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=1)
+    js_learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=NUM_NEW_ATTENTION_HEADS)
     js_learner.prepare_model()
     
     javascript_training_time = js_learner.train_task(javascript_train, "javascript", epochs=2, batch_size=8)
