@@ -889,7 +889,7 @@ def run_attention_head_expansion_experiment():
     log_message(f"New attention heads per layer: 4")
     
     # Initialize learner
-    learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=1)
+    learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=4)
     learner.prepare_model()
     
     # Track experiment results
@@ -922,7 +922,7 @@ def run_attention_head_expansion_experiment():
     log_message("Phase 2: Training on JavaScript (fresh model)...")
     
     # Create fresh learner for JavaScript
-    js_learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=1)
+    js_learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=4)
     js_learner.prepare_model()
     
     javascript_training_time = js_learner.train_task(javascript_train, "javascript", epochs=2, batch_size=8)
