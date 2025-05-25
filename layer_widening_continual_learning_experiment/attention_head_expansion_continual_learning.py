@@ -147,8 +147,8 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         # Dropout for new heads
         self.dropout = torch.nn.Dropout(0.1)
         
-        # Gate to control contribution of new heads (start disabled)
-        self.gate = torch.nn.Parameter(torch.tensor(-5.0, dtype=self.dtype, device=device))  # sigmoid(-5) ≈ 0.0067
+        # Gate to control contribution of new heads (start more enabled for better gradient flow)
+        self.gate = torch.nn.Parameter(torch.tensor(-2.0, dtype=self.dtype, device=device))  # sigmoid(-2) ≈ 0.12 (12%)
         
         # Initialize new head weights conservatively
         with torch.no_grad():
@@ -188,14 +188,14 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
                 self.new_o_proj.weight.data = tiled_o.clone()
             
             # Scale down the copied weights to start with smaller contribution
-            scale_factor = 0.3  # Start with 30% of original magnitude (increased from 10%)
+            scale_factor = 0.5  # Start with 50% of original magnitude (increased from 30%)
             self.new_q_proj.weight.data *= scale_factor
             self.new_k_proj.weight.data *= scale_factor
             self.new_v_proj.weight.data *= scale_factor
             self.new_o_proj.weight.data *= scale_factor
             
-            # Add small random noise for diversity
-            noise_std = 0.01  # Increased noise for better gradient flow
+            # Add larger random noise for diversity and better gradient flow
+            noise_std = 0.05  # Increased noise significantly for better gradient flow
             self.new_q_proj.weight.data += torch.randn_like(self.new_q_proj.weight.data) * noise_std
             self.new_k_proj.weight.data += torch.randn_like(self.new_k_proj.weight.data) * noise_std
             self.new_v_proj.weight.data += torch.randn_like(self.new_v_proj.weight.data) * noise_std
@@ -319,7 +319,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         new_attention_output = self.new_o_proj(new_attention_output)
         
         # Apply gate to control contribution
-        gate_value = torch.sigmoid(self.gate) * 0.1  # Max 10% contribution (increased from 1%)
+        gate_value = torch.sigmoid(self.gate) * 0.25  # Max 25% contribution (increased from 10%)
         gated_new_output = gate_value * new_attention_output
         
         # Combine original and new attention outputs
@@ -562,12 +562,12 @@ class AttentionHeadExpansionContinualLearner:
         frozen_params = [p for p in model.parameters() if not p.requires_grad]
         log_message(f"Verified: {len(frozen_params)} base model parameters are frozen")
         
-        # Conservative optimizer settings
-        optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
+        # More aggressive optimizer settings for better gradient flow
+        optimizer = torch.optim.AdamW(trainable_params, lr=3e-4, weight_decay=0.01)  # Increased LR from 1e-4
         
         # Learning rate scheduler with warmup
         scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.01, total_iters=200
+            optimizer, start_factor=0.1, total_iters=100  # Less aggressive warmup
         )
         
         model.train()
@@ -645,9 +645,9 @@ class AttentionHeadExpansionContinualLearner:
                         log_message(f"Warning: Invalid gradients detected, skipping batch {i//batch_size + 1}")
                         continue
                     
-                    # Very aggressive gradient clipping for attention heads to prevent overflow
+                    # Less aggressive gradient clipping to allow better gradient flow
                     if device == "cuda":
-                        torch.nn.utils.clip_grad_norm_(trainable_params, 0.1)  # Very conservative on CUDA
+                        torch.nn.utils.clip_grad_norm_(trainable_params, 0.5)  # Increased from 0.1
                     else:
                         torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)  # Normal clipping on other devices
                     
