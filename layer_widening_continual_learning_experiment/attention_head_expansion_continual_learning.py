@@ -148,15 +148,58 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         self.dropout = torch.nn.Dropout(0.1)
         
         # Gate to control contribution of new heads (start disabled)
-        self.gate = torch.nn.Parameter(torch.tensor(-5.0, dtype=self.dtype, device=device))
+        self.gate = torch.nn.Parameter(torch.tensor(-10.0, dtype=self.dtype, device=device))  # sigmoid(-10) ≈ 0.000045
         
         # Initialize new head weights conservatively
         with torch.no_grad():
-            # Small random initialization
-            torch.nn.init.normal_(self.new_q_proj.weight, mean=0.0, std=0.02)
-            torch.nn.init.normal_(self.new_k_proj.weight, mean=0.0, std=0.02)
-            torch.nn.init.normal_(self.new_v_proj.weight, mean=0.0, std=0.02)
-            torch.nn.init.zeros_(self.new_o_proj.weight)  # Start with zero output
+            # Copy weights from original attention heads for stability
+            # This provides much better initialization than random weights
+            
+            # Get original Q, K, V, O weights
+            orig_q_weight = self.original_attention.q.weight.data  # [d_model, num_heads * d_kv]
+            orig_k_weight = self.original_attention.k.weight.data
+            orig_v_weight = self.original_attention.v.weight.data
+            orig_o_weight = self.original_attention.o.weight.data  # [num_heads * d_kv, d_model]
+            
+            # Calculate dimensions
+            orig_head_dim = self.num_original_heads * self.d_kv
+            new_head_dim = self.num_new_heads * self.d_kv
+            
+            # Copy and adapt weights for new heads
+            if new_head_dim <= orig_head_dim:
+                # If we need fewer parameters, take a subset
+                self.new_q_proj.weight.data = orig_q_weight[:new_head_dim, :].clone()
+                self.new_k_proj.weight.data = orig_k_weight[:new_head_dim, :].clone()
+                self.new_v_proj.weight.data = orig_v_weight[:new_head_dim, :].clone()
+                self.new_o_proj.weight.data = orig_o_weight[:, :new_head_dim].clone()
+            else:
+                # If we need more parameters, tile/repeat the original weights
+                repeat_factor = (new_head_dim + orig_head_dim - 1) // orig_head_dim  # Ceiling division
+                
+                # Tile the weights
+                tiled_q = orig_q_weight.repeat(repeat_factor, 1)[:new_head_dim, :]
+                tiled_k = orig_k_weight.repeat(repeat_factor, 1)[:new_head_dim, :]
+                tiled_v = orig_v_weight.repeat(repeat_factor, 1)[:new_head_dim, :]
+                tiled_o = orig_o_weight.repeat(1, repeat_factor)[:, :new_head_dim]
+                
+                self.new_q_proj.weight.data = tiled_q.clone()
+                self.new_k_proj.weight.data = tiled_k.clone()
+                self.new_v_proj.weight.data = tiled_v.clone()
+                self.new_o_proj.weight.data = tiled_o.clone()
+            
+            # Scale down the copied weights to start with smaller contribution
+            scale_factor = 0.1  # Start with 10% of original magnitude
+            self.new_q_proj.weight.data *= scale_factor
+            self.new_k_proj.weight.data *= scale_factor
+            self.new_v_proj.weight.data *= scale_factor
+            self.new_o_proj.weight.data *= scale_factor
+            
+            # Add small random noise for diversity
+            noise_std = 0.001
+            self.new_q_proj.weight.data += torch.randn_like(self.new_q_proj.weight.data) * noise_std
+            self.new_k_proj.weight.data += torch.randn_like(self.new_k_proj.weight.data) * noise_std
+            self.new_v_proj.weight.data += torch.randn_like(self.new_v_proj.weight.data) * noise_std
+            self.new_o_proj.weight.data += torch.randn_like(self.new_o_proj.weight.data) * noise_std
         
         log_message(f"Created ExpandedMultiHeadAttention: {self.num_original_heads} original + {num_new_heads} new heads on {device} ({self.dtype})")
     
@@ -207,14 +250,61 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         
         # Apply attention mask if provided
         if mask is not None:
-            # Expand mask for new heads
-            expanded_mask = mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
+            # T5 attention masks can have different shapes, handle them properly
+            if mask.dim() == 2:  # [batch, seq_len]
+                # Standard case: expand to [batch, num_heads, seq_len, kv_seq_len]
+                kv_seq_len = new_k.size(-2)
+                expanded_mask = mask.unsqueeze(1).unsqueeze(1).expand(-1, self.num_new_heads, -1, kv_seq_len)
+            elif mask.dim() == 3:  # [batch, seq_len, kv_seq_len]
+                # Cross-attention case
+                expanded_mask = mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
+            elif mask.dim() == 4:  # [batch, num_heads, seq_len, kv_seq_len]
+                # Already in the right format, just adjust for new heads
+                if mask.size(1) == 1:
+                    # Single head mask, expand to new heads
+                    expanded_mask = mask.expand(-1, self.num_new_heads, -1, -1)
+                else:
+                    # Multi-head mask, take first few heads or repeat
+                    if self.num_new_heads <= mask.size(1):
+                        expanded_mask = mask[:, :self.num_new_heads, :, :]
+                    else:
+                        # Repeat the mask pattern
+                        repeat_factor = (self.num_new_heads + mask.size(1) - 1) // mask.size(1)
+                        expanded_mask = mask.repeat(1, repeat_factor, 1, 1)[:, :self.num_new_heads, :, :]
+            elif mask.dim() == 5:  # [batch, 1, 1, seq_len, kv_seq_len] - T5 relative attention bias format
+                # Squeeze out the extra dimensions and expand properly
+                squeezed_mask = mask.squeeze(1).squeeze(1)  # [batch, seq_len, kv_seq_len]
+                expanded_mask = squeezed_mask.unsqueeze(1).expand(-1, self.num_new_heads, -1, -1)
+            else:
+                # Fallback: try to reshape to 4D
+                batch_size = mask.size(0)
+                seq_len = scores.size(-2)
+                kv_seq_len = scores.size(-1)
+                expanded_mask = mask.view(batch_size, 1, seq_len, kv_seq_len).expand(-1, self.num_new_heads, -1, -1)
+            
             scores = scores.masked_fill(expanded_mask == 0, -1e9)
         
         # Apply position bias if provided (T5 relative attention)
         if position_bias is not None:
             # Position bias should be broadcastable to [batch, num_heads, seq_len, kv_seq_len]
-            scores = scores + position_bias
+            # The position bias comes from original attention and may have different number of heads
+            if position_bias.size(1) == self.num_original_heads:
+                # Original position bias has 8 heads, we need 4 heads
+                if self.num_new_heads <= self.num_original_heads:
+                    # Take subset of position bias for new heads
+                    new_position_bias = position_bias[:, :self.num_new_heads, :, :]
+                else:
+                    # Repeat position bias pattern for more new heads
+                    repeat_factor = (self.num_new_heads + self.num_original_heads - 1) // self.num_original_heads
+                    new_position_bias = position_bias.repeat(1, repeat_factor, 1, 1)[:, :self.num_new_heads, :, :]
+            elif position_bias.size(1) == 1:
+                # Single head bias, expand to new heads
+                new_position_bias = position_bias.expand(-1, self.num_new_heads, -1, -1)
+            else:
+                # Try to use as-is if dimensions match
+                new_position_bias = position_bias
+            
+            scores = scores + new_position_bias
         
         # Softmax attention weights
         attention_weights = torch.softmax(scores, dim=-1)
@@ -229,7 +319,7 @@ class ExpandedMultiHeadAttention(torch.nn.Module):
         new_attention_output = self.new_o_proj(new_attention_output)
         
         # Apply gate to control contribution
-        gate_value = torch.sigmoid(self.gate) * 0.1  # Max 10% contribution
+        gate_value = torch.sigmoid(self.gate) * 0.01  # Max 1% contribution initially
         gated_new_output = gate_value * new_attention_output
         
         # Combine original and new attention outputs
