@@ -67,7 +67,7 @@ class LoRAExtension:
             param.requires_grad = False
         
         frozen_params = sum(1 for p in self.base_model.parameters() if not p.requires_grad)
-        if self.device_manager:
+        # Always log now
             log_message(f"Froze {frozen_params} base model parameters")
     
     def create_adapter(self, task_name: str) -> nn.Module:
@@ -92,7 +92,7 @@ class LoRAExtension:
         trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
         lora_params = sum(p.numel() for n, p in lora_model.named_parameters() if 'lora' in n and p.requires_grad)
         
-        if self.device_manager:
+        # Always log now
             log_message(
                 f"Created LoRA adapter for {task_name}: "
                 f"{lora_params:,} LoRA params / {trainable_params:,} trainable / {total_params:,} total"
@@ -109,7 +109,7 @@ class LoRAExtension:
         model.save_pretrained(save_path)
         self.adapters[task_name] = save_path
         
-        if self.device_manager:
+        # Always log now
             log_message(f"LoRA adapter for {task_name} saved to {save_path}")
         
         return save_path
@@ -128,7 +128,7 @@ class LoRAExtension:
         
         self.current_adapter = task_name
         
-        if self.device_manager:
+        # Always log now
             log_message(f"Loaded LoRA adapter for {task_name}")
         
         return adapter_model
@@ -171,7 +171,7 @@ class TransformerLayerExtension:
             param.requires_grad = False
         
         frozen_params = sum(1 for p in self.base_model.parameters() if not p.requires_grad)
-        if self.device_manager:
+        # Always log now
             log_message(f"Froze {frozen_params} base model parameters")
     
     def create_extended_model(self, task_name: str) -> nn.Module:
@@ -186,7 +186,7 @@ class TransformerLayerExtension:
         total_params = sum(p.numel() for p in extended_model.parameters())
         trainable_params = sum(p.numel() for p in extended_model.parameters() if p.requires_grad)
         
-        if self.device_manager:
+        # Always log now
             log_message(
                 f"Created extended model for {task_name}: "
                 f"{trainable_params:,} trainable / {total_params:,} total parameters "
@@ -238,7 +238,7 @@ class TransformerLayerExtension:
             return new_model
             
         except Exception as e:
-            if self.device_manager:
+            # Always log now
                 log_message(f"Error creating extended model: {e}", level="ERROR")
             raise
     
@@ -251,7 +251,7 @@ class TransformerLayerExtension:
         model.save_pretrained(save_path)
         self.checkpoints[task_name] = save_path
         
-        if self.device_manager:
+        # Always log now
             log_message(f"Model checkpoint for {task_name} saved to {save_path}")
         
         return save_path
@@ -267,7 +267,7 @@ class TransformerLayerExtension:
         
         self.current_checkpoint = task_name
         
-        if self.device_manager:
+        # Always log now
             log_message(f"Loaded checkpoint for {task_name}")
         
         return model
@@ -308,12 +308,12 @@ class HybridExtension:
         if use_shared_layer and shared_layer_model is not None:
             # Use the shared layer model as starting point
             model_with_layer = deepcopy(shared_layer_model)
-            if self.device_manager:
+            # Always log now
                 log_message(f"Using shared layer for {task_name}")
         else:
             # Create new transformer layer
             model_with_layer = self.layer_extension._add_transformer_layer(self.base_model)
-            if self.device_manager:
+            # Always log now
                 log_message(f"Created new layer for {task_name}")
         
         # Get the new layer index for later reference
@@ -349,7 +349,7 @@ class HybridExtension:
         layer_params = sum(p.numel() for n, p in hybrid_model.named_parameters() 
                           if f'encoder.block.{new_layer_idx}' in n and p.requires_grad and 'lora' not in n)
         
-        if self.device_manager:
+        # Always log now
             log_message(
                 f"Hybrid model for {task_name}: "
                 f"LoRA={lora_params:,}, Layer={layer_params:,}, Total={total_trainable:,}"
@@ -370,7 +370,7 @@ class HybridExtension:
         model.save_pretrained(save_path)
         self.hybrid_models[task_name] = save_path
         
-        if self.device_manager:
+        # Always log now
             log_message(f"Hybrid model for {task_name} saved to {save_path}")
         
         return save_path
@@ -392,7 +392,7 @@ class HybridExtension:
             # reconstruct the base model with layer first
             raise NotImplementedError("Loading hybrid model without base_with_layer not implemented")
         
-        if self.device_manager:
+        # Always log now
             log_message(f"Loaded hybrid model for {task_name}")
         
         return hybrid_model
