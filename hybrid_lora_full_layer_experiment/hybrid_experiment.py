@@ -23,9 +23,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for data loader
+# Add utils to path for data loader and model evaluator
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_loader import load_and_prepare_data
+from utils.model_evaluator import ModelEvaluator
 
 # Set random seeds for reproducibility
 def set_seed(seed: int):
@@ -309,81 +310,10 @@ class HybridLoRAFullLayerLearner:
         return total_time
         
     def evaluate_model(self, model, data, num_samples: int = 100, language: str = None) -> Dict[str, float]:
-        """Evaluate model comprehensively"""
-        model.eval()
-        bleu_scores = []
-        pass_scores = []
-        
-        smoothing = SmoothingFunction().method1
-        eval_samples = min(num_samples, len(data))
-        
-        with torch.no_grad():
-            for i in range(eval_samples):
-                try:
-                    source_code = data[i]["func_code_string"]
-                    if not source_code or not str(source_code).strip():
-                        continue
-                        
-                    input_text = source_code[:len(source_code)//2]
-                    target_text = source_code
-                    
-                    inputs = self.tokenizer(
-                        input_text, 
-                        return_tensors="pt", 
-                        max_length=512, 
-                        truncation=True
-                    ).to(model.device)
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        max_length=512, 
-                        num_beams=3,
-                        no_repeat_ngram_size=2,
-                        do_sample=True,
-                        temperature=0.7
-                    )
-                    
-                    pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    
-                    if not pred_text or not pred_text.strip():
-                        bleu_scores.append(0.0)
-                        pass_scores.append(0.0)
-                        continue
-                    
-                    # Calculate BLEU score
-                    target_tokens = self.tokenizer.tokenize(target_text)
-                    pred_tokens = self.tokenizer.tokenize(pred_text)
-                    
-                    if target_tokens and pred_tokens:
-                        bleu = sentence_bleu([target_tokens], pred_tokens, smoothing_function=smoothing)
-                        bleu_scores.append(bleu)
-                    else:
-                        bleu_scores.append(0.0)
-                        
-                    # Test syntactic correctness
-                    try:
-                        if language == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
-                            compile(pred_text, "<string>", "exec")
-                            pass_scores.append(1.0)
-                        elif language == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
-                            if pred_text.strip() and '{' in pred_text and '}' in pred_text:
-                                pass_scores.append(1.0)
-                            else:
-                                pass_scores.append(0.0)
-                        else:
-                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
-                    except:
-                        pass_scores.append(0.0)
-                        
-                except Exception as e:
-                    bleu_scores.append(0.0)
-                    pass_scores.append(0.0)
-                    
-        return {
-            'bleu': np.mean(bleu_scores) if bleu_scores else 0.0,
-            'pass_rate': np.mean(pass_scores) if pass_scores else 0.0,
-            'num_samples': len(bleu_scores)
-        }
+        """Evaluate model comprehensively using ModelEvaluator"""
+        evaluator = ModelEvaluator(self.tokenizer)
+        results = evaluator.evaluate_comprehensive(model, data, language, num_samples)
+        return results.to_dict()
 
 def get_memory_usage():
     """Get current memory usage in GB"""

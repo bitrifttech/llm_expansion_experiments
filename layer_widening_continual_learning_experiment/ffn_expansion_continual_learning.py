@@ -22,6 +22,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for model evaluator
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.model_evaluator import ModelEvaluator
+
 # Add utils to path for model analyzer and data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
@@ -523,65 +527,10 @@ class FFNExpansionContinualLearner:
         return training_time
         
     def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Dict[str, float]:
-        """Evaluate model performance"""
-        model.eval()
-        
-        # Sample data for evaluation
-        eval_data = data[:num_samples] if len(data) > num_samples else data
-        
-        bleu_scores = []
-        pass_count = 0
-        meteor_scores = []
-        edit_distances = []
-        ast_similarities = []
-        complexities = []
-        
-        with torch.no_grad():
-            for item in eval_data:
-                input_text = item['func_name'] + ' ' + item['docstring']
-                target_code = item['code']
-                
-                # Generate prediction
-                input_encoding = self.tokenizer(
-                    input_text, 
-                    truncation=True, 
-                    max_length=256, 
-                    return_tensors="pt"
-                ).to(self.device)
-                
-                generated_ids = model.generate(
-                    input_ids=input_encoding.input_ids,
-                    attention_mask=input_encoding.attention_mask,
-                    max_length=256,
-                    num_beams=4,
-                    early_stopping=True,
-                    pad_token_id=self.tokenizer.pad_token_id
-                )
-                
-                predicted_code = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                
-                # Calculate metrics
-                bleu_score = self._calculate_bleu(predicted_code, target_code)
-                bleu_scores.append(bleu_score)
-                
-                # Syntax check
-                if self._is_syntactically_correct(predicted_code, language):
-                    pass_count += 1
-                
-                # Additional metrics
-                meteor_scores.append(self._calculate_meteor(predicted_code, target_code))
-                edit_distances.append(self._calculate_edit_distance(predicted_code, target_code))
-                ast_similarities.append(self._calculate_ast_similarity(predicted_code, target_code, language))
-                complexities.append(self._calculate_complexity(predicted_code, language))
-        
-        return {
-            'bleu': np.mean(bleu_scores),
-            'pass_rate': pass_count / len(eval_data),
-            'meteor': np.mean(meteor_scores),
-            'edit_distance': np.mean(edit_distances),
-            'ast_similarity': np.mean(ast_similarities),
-            'complexity': np.mean(complexities)
-        }
+        """Evaluate model performance using ModelEvaluator"""
+        evaluator = ModelEvaluator(self.tokenizer)
+        results = evaluator.evaluate_comprehensive(model, data, language, num_samples)
+        return results.to_dict()
     
     def _calculate_bleu(self, predicted: str, target: str) -> float:
         """Calculate BLEU score"""

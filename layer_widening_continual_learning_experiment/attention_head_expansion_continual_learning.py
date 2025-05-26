@@ -22,6 +22,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for model evaluator
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.model_evaluator import ModelEvaluator
+
 # Add utils to path for model analyzer and data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
@@ -782,18 +786,11 @@ class AttentionHeadExpansionContinualLearner:
         return training_time
     
     def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Tuple[float, float]:
-        """Evaluate model performance"""
+        """Evaluate model performance using ModelEvaluator"""
         model.eval()
         
         # Enable generation mode to prevent new heads from interfering with generation
         enable_generation_mode(model)
-        
-        # Sample data for evaluation
-        eval_data = random.sample(data, min(num_samples, len(data)))
-        
-        bleu_scores = []
-        correct_predictions = 0
-        total_predictions = len(eval_data)
         
         # Verification: Check that new heads are contributing
         expanded_attentions = []
@@ -810,86 +807,9 @@ class AttentionHeadExpansionContinualLearner:
                       f"K:{stats['new_k_weight_norm']:.4f}, "
                       f"V:{stats['new_v_weight_norm']:.4f}]")
         
-        with torch.no_grad():
-            for item in eval_data:
-                input_text = item['input']
-                target_text = item['target']
-                
-                # Tokenize input
-                input_encoding = self.tokenizer(
-                    input_text, 
-                    truncation=True, 
-                    max_length=512, 
-                    return_tensors="pt"
-                ).to(self.device)
-                
-                try:
-                    # Generate prediction with better parameters to prevent repetitive generation
-                    outputs = model.generate(
-                        input_ids=input_encoding.input_ids,
-                        attention_mask=input_encoding.attention_mask,
-                        max_length=min(256, len(input_encoding.input_ids[0]) + 100),  # Reasonable max length
-                        num_beams=4,
-                        early_stopping=True,
-                        repetition_penalty=1.2,  # Prevent repetitive generation
-                        no_repeat_ngram_size=3,  # Prevent 3-gram repetition
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id
-                    )
-                    
-                    # Decode prediction
-                    predicted_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    
-                    # DEBUG: Print first few examples to see what's being generated
-                    if len(bleu_scores) < 3:  # Only print first 3 examples
-                        log_message(f"DEBUG Example {len(bleu_scores) + 1}:")
-                        log_message(f"  Input: {input_text[:100]}...")
-                        log_message(f"  Target: {target_text[:100]}...")
-                        log_message(f"  Predicted: {predicted_text[:100]}...")
-                        log_message(f"  Predicted length: {len(predicted_text)}")
-                    
-                    # Calculate BLEU score
-                    reference = target_text.split()
-                    candidate = predicted_text.split()
-                    
-                    if len(candidate) > 0 and len(reference) > 0:
-                        smoothing = SmoothingFunction().method1
-                        bleu = sentence_bleu([reference], candidate, smoothing_function=smoothing)
-                        bleu_scores.append(bleu)
-                        
-                        # DEBUG: Print BLEU calculation details for first few examples
-                        if len(bleu_scores) <= 3:
-                            log_message(f"  Reference tokens: {len(reference)}, Candidate tokens: {len(candidate)}")
-                            log_message(f"  BLEU score: {bleu:.4f}")
-                    else:
-                        # DEBUG: Log why BLEU wasn't calculated
-                        if len(bleu_scores) < 3:
-                            log_message(f"  SKIPPED: Reference tokens: {len(reference)}, Candidate tokens: {len(candidate)}")
-                    
-                    # Check functional correctness for code
-                    if language and self._is_functionally_correct(predicted_text, target_text, language):
-                        correct_predictions += 1
-                        
-                except Exception as e:
-                    # DEBUG: Log exceptions
-                    if len(bleu_scores) < 3:
-                        log_message(f"  EXCEPTION: {str(e)}")
-                    continue
-        
-        # Calculate metrics
-        avg_bleu = np.mean(bleu_scores) if bleu_scores else 0.0
-        pass_rate = (correct_predictions / total_predictions) * 100 if total_predictions > 0 else 0.0
-        
-        # DEBUG: Print evaluation statistics
-        log_message(f"=== EVALUATION STATISTICS ===")
-        log_message(f"Total samples processed: {total_predictions}")
-        log_message(f"Valid BLEU scores: {len(bleu_scores)}")
-        log_message(f"Functional correct: {correct_predictions}")
-        log_message(f"Average BLEU: {avg_bleu:.4f}")
-        log_message(f"Pass rate: {pass_rate:.2f}%")
-        if len(bleu_scores) > 0:
-            log_message(f"BLEU score range: {min(bleu_scores):.4f} - {max(bleu_scores):.4f}")
-        log_message(f"================================")
+        # Use ModelEvaluator for consistent evaluation
+        evaluator = ModelEvaluator(self.tokenizer)
+        results = evaluator.evaluate_basic(model, data, language, num_samples)
         
         # Final verification of contribution
         if len(expanded_attentions) > 0:
@@ -902,10 +822,15 @@ class AttentionHeadExpansionContinualLearner:
             avg_contribution = total_contribution / len(expanded_attentions)
             log_message(f"Average new head contribution: {avg_contribution:.6f}")
         
+        log_message(f"=== EVALUATION STATISTICS ===")
+        log_message(f"BLEU: {results[0]:.4f}")
+        log_message(f"Pass rate: {results[1]:.2%}")
+        log_message(f"================================")
+        
         # Disable generation mode to restore normal operation
         disable_generation_mode(model)
         
-        return avg_bleu, pass_rate
+        return results
     
     def _is_functionally_correct(self, predicted: str, target: str, language: str) -> bool:
         """Check if predicted code is functionally correct"""

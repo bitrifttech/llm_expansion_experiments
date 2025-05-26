@@ -23,6 +23,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
+# Add utils to path for model evaluator
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.model_evaluator import ModelEvaluator, ContinualLearningEvaluator
+
 # Add utils to path for data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_loader import load_and_prepare_data
@@ -323,90 +327,10 @@ class LoRAContinualLearner(ContinualLearner):
         return (time.time() - start_time) / 60
         
     def _evaluate_model(self, model, data, num_samples: int, language: str = None) -> Tuple[float, float]:
-        """Internal evaluation method"""
-        model.eval()
-        bleu_scores = []
-        pass_scores = []
-        
-        smoothing = SmoothingFunction().method1
-        eval_samples = min(num_samples, len(data))
-        
-        with torch.no_grad():
-            for i in range(eval_samples):
-                try:
-                    source_code = data[i]["func_code_string"]
-                    if not source_code or not str(source_code).strip():
-                        continue
-                        
-                    # Use first part as input, full code as target
-                    input_text = source_code[:len(source_code)//2]
-                    target_text = source_code
-                    
-                    inputs = self.tokenizer(
-                        input_text, 
-                        return_tensors="pt", 
-                        max_length=512, 
-                        truncation=True
-                    ).to(model.device)  # Use model.device instead of self.device
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        max_length=512, 
-                        num_beams=3,
-                        no_repeat_ngram_size=2,
-                        do_sample=True,
-                        temperature=0.7
-                    )
-                    
-                    pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    
-                    # Validate generated text
-                    if not pred_text or not pred_text.strip():
-                        # Empty generation
-                        bleu_scores.append(0.0)
-                        meteor_scores.append(0.0)
-                        edit_distances.append(1.0)
-                        ast_similarities.append(0.0)
-                        complexity_scores.append(1.0)
-                        pass_scores.append(0.0)
-                        continue
-                    
-                    # Calculate BLEU score
-                    target_tokens = self.tokenizer.tokenize(target_text)
-                    pred_tokens = self.tokenizer.tokenize(pred_text)
-                    
-                    if target_tokens and pred_tokens:
-                        bleu = sentence_bleu([target_tokens], pred_tokens, smoothing_function=smoothing)
-                        bleu_scores.append(bleu)
-                    else:
-                        bleu_scores.append(0.0)
-                        
-                    # Test syntactic correctness - use language parameter from dataset or infer
-                    try:
-                        # Auto-detect language if not provided
-                        detected_language = language or data[i].get("language", "").lower()
-                        
-                        if detected_language == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
-                            # Python code - try to compile
-                            compile(pred_text, "<string>", "exec")
-                            pass_scores.append(1.0)
-                        elif detected_language == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
-                            # JavaScript code - basic syntax check
-                            if pred_text.strip() and '{' in pred_text and '}' in pred_text and not pred_text.strip().startswith('//'):
-                                pass_scores.append(1.0)
-                            else:
-                                pass_scores.append(0.0)
-                        else:
-                            # Unknown language - basic non-empty check
-                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
-                    except:
-                        pass_scores.append(0.0)
-                        
-                except Exception as e:
-                    bleu_scores.append(0.0)
-                    pass_scores.append(0.0)
-                    
-        return np.mean(bleu_scores) if bleu_scores else 0.0, np.mean(pass_scores) if pass_scores else 0.0
+        """Internal evaluation method using ModelEvaluator"""
+        evaluator = ModelEvaluator(self.tokenizer)
+        results = evaluator.evaluate_basic(model, data, language, num_samples)
+        return results
 
 class FullLayerContinualLearner(ContinualLearner):
     """New layer training with task-specific layer swapping (fair comparison with LoRA)"""
@@ -693,154 +617,76 @@ def calculate_meteor_score_safe(pred_text: str, target_text: str) -> float:
         return 0.0
 
 class ComprehensiveEvaluator:
-    """Comprehensive evaluation with multiple metrics"""
+    """Comprehensive evaluation with multiple metrics using ModelEvaluator"""
     
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        self.smoothing = SmoothingFunction().method1
+        self.evaluator = ModelEvaluator(tokenizer)
         
     def evaluate_comprehensive(self, model, data, language: str, num_samples: int = 100) -> Dict[str, float]:
-        """Run comprehensive evaluation with all metrics"""
-        model.eval()
-        
-        # Metric collectors
-        bleu_scores = []
-        meteor_scores = []
-        edit_distances = []
-        ast_similarities = []
-        complexity_scores = []
-        pass_scores = []
-        
-        eval_samples = min(num_samples, len(data))
-        
-        with torch.no_grad():
-            for i in range(eval_samples):
-                try:
-                    source_code = data[i]["func_code_string"]
-                    if not source_code or not str(source_code).strip():
-                        continue
-                        
-                    # Use first part as input, full code as target
-                    input_text = source_code[:len(source_code)//2]
-                    target_text = source_code
-                    
-                    inputs = self.tokenizer(
-                        input_text, 
-                        return_tensors="pt", 
-                        max_length=512, 
-                        truncation=True
-                    ).to(model.device)
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        max_length=512, 
-                        num_beams=3,
-                        no_repeat_ngram_size=2,
-                        do_sample=True,
-                        temperature=0.7
-                    )
-                    
-                    pred_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    
-                    # Validate generated text
-                    if not pred_text or not pred_text.strip():
-                        # Empty generation
-                        bleu_scores.append(0.0)
-                        meteor_scores.append(0.0)
-                        edit_distances.append(1.0)
-                        ast_similarities.append(0.0)
-                        complexity_scores.append(1.0)
-                        pass_scores.append(0.0)
-                        continue
-                    
-                    # BLEU Score
-                    target_tokens = self.tokenizer.tokenize(target_text)
-                    pred_tokens = self.tokenizer.tokenize(pred_text)
-                    
-                    if target_tokens and pred_tokens:
-                        bleu = sentence_bleu([target_tokens], pred_tokens, smoothing_function=self.smoothing)
-                        bleu_scores.append(bleu)
-                    else:
-                        bleu_scores.append(0.0)
-                    
-                    # METEOR Score
-                    meteor = calculate_meteor_score_safe(pred_text, target_text)
-                    meteor_scores.append(meteor)
-                    
-                    # Edit Distance
-                    edit_dist = calculate_edit_distance(pred_text, target_text)
-                    edit_distances.append(edit_dist)
-                    
-                    # AST Similarity
-                    ast_sim = calculate_ast_similarity(pred_text, target_text, language)
-                    ast_similarities.append(ast_sim)
-                    
-                    # Code Complexity
-                    complexity = calculate_code_complexity(pred_text, language)
-                    complexity_scores.append(complexity)
-                    
-                    # Compilation/Execution Test
-                    try:
-                        if language.lower() == "python" or any(keyword in source_code.lower() for keyword in ['def ', 'import ', 'class ', 'print(']):
-                            # Python code - try to compile
-                            compile(pred_text, "<string>", "exec")
-                            pass_scores.append(1.0)
-                        elif language.lower() == "javascript" or any(keyword in source_code.lower() for keyword in ['function ', 'var ', 'let ', 'const ', 'console.']):
-                            # JavaScript code - basic syntax check
-                            if pred_text.strip() and '{' in pred_text and '}' in pred_text and not pred_text.strip().startswith('//'):
-                                pass_scores.append(1.0)
-                            else:
-                                pass_scores.append(0.0)
-                        else:
-                            # Unknown language - basic non-empty check
-                            pass_scores.append(1.0 if pred_text.strip() else 0.0)
-                    except:
-                        pass_scores.append(0.0)
-                        
-                except Exception as e:
-                    # Add zero scores for failed samples
-                    bleu_scores.append(0.0)
-                    meteor_scores.append(0.0)
-                    edit_distances.append(1.0)
-                    ast_similarities.append(0.0)
-                    complexity_scores.append(1.0)
-                    pass_scores.append(0.0)
-        
-        return {
-            'bleu': np.mean(bleu_scores) if bleu_scores else 0.0,
-            'meteor': np.mean(meteor_scores) if meteor_scores else 0.0,
-            'edit_distance': np.mean(edit_distances) if edit_distances else 1.0,
-            'ast_similarity': np.mean(ast_similarities) if ast_similarities else 0.0,
-            'complexity': np.mean(complexity_scores) if complexity_scores else 1.0,
-            'pass_rate': np.mean(pass_scores) if pass_scores else 0.0,
-            'num_samples': len(bleu_scores)
-        }
+        """Run comprehensive evaluation with all metrics using ModelEvaluator"""
+        results = self.evaluator.evaluate_comprehensive(model, data, language, num_samples)
+        return results.to_dict()
 
 def calculate_continual_learning_metrics(baseline_python: Dict, baseline_js: Dict, 
                                        python_after_python: Dict, js_after_python: Dict,
                                        python_after_js: Dict, js_after_js: Dict) -> Dict[str, float]:
-    """Calculate continual learning specific metrics"""
+    """Calculate continual learning specific metrics using ContinualLearningEvaluator"""
     
-    # Forward Transfer: How much Python training helped JavaScript
-    js_baseline_bleu = baseline_js['bleu']
-    js_after_python_bleu = js_after_python['bleu']
-    forward_transfer = max(0, js_after_python_bleu - js_baseline_bleu)
+    # Convert dict results to EvaluationResults objects for ContinualLearningEvaluator
+    from utils.model_evaluator import EvaluationResults
     
-    # Backward Interference: How much JavaScript training hurt Python  
-    python_after_python_bleu = python_after_python['bleu']
-    python_after_js_bleu = python_after_js['bleu']
-    backward_interference = max(0, python_after_python_bleu - python_after_js_bleu)
+    baseline_task1 = EvaluationResults(
+        bleu=baseline_python['bleu'], meteor=baseline_python.get('meteor', 0.0),
+        pass_rate=baseline_python.get('pass_rate', 0.0), edit_distance=baseline_python.get('edit_distance', 1.0),
+        ast_similarity=baseline_python.get('ast_similarity', 0.0), complexity=baseline_python.get('complexity', 1.0),
+        num_samples=baseline_python.get('num_samples', 0), language="python"
+    )
     
-    # Retention Score: Overall knowledge retention
-    python_retention = python_after_js_bleu / python_after_python_bleu if python_after_python_bleu > 0 else 0
-    js_improvement = js_after_js['bleu'] / js_baseline_bleu if js_baseline_bleu > 0 else 0
-    retention_score = (python_retention + js_improvement) / 2
+    baseline_task2 = EvaluationResults(
+        bleu=baseline_js['bleu'], meteor=baseline_js.get('meteor', 0.0),
+        pass_rate=baseline_js.get('pass_rate', 0.0), edit_distance=baseline_js.get('edit_distance', 1.0),
+        ast_similarity=baseline_js.get('ast_similarity', 0.0), complexity=baseline_js.get('complexity', 1.0),
+        num_samples=baseline_js.get('num_samples', 0), language="javascript"
+    )
     
-    return {
-        'forward_transfer': forward_transfer,
-        'backward_interference': backward_interference, 
-        'retention_score': retention_score
-    }
+    task1_after_task1 = EvaluationResults(
+        bleu=python_after_python['bleu'], meteor=python_after_python.get('meteor', 0.0),
+        pass_rate=python_after_python.get('pass_rate', 0.0), edit_distance=python_after_python.get('edit_distance', 1.0),
+        ast_similarity=python_after_python.get('ast_similarity', 0.0), complexity=python_after_python.get('complexity', 1.0),
+        num_samples=python_after_python.get('num_samples', 0), language="python"
+    )
+    
+    task2_after_task1 = EvaluationResults(
+        bleu=js_after_python['bleu'], meteor=js_after_python.get('meteor', 0.0),
+        pass_rate=js_after_python.get('pass_rate', 0.0), edit_distance=js_after_python.get('edit_distance', 1.0),
+        ast_similarity=js_after_python.get('ast_similarity', 0.0), complexity=js_after_python.get('complexity', 1.0),
+        num_samples=js_after_python.get('num_samples', 0), language="javascript"
+    )
+    
+    task1_after_task2 = EvaluationResults(
+        bleu=python_after_js['bleu'], meteor=python_after_js.get('meteor', 0.0),
+        pass_rate=python_after_js.get('pass_rate', 0.0), edit_distance=python_after_js.get('edit_distance', 1.0),
+        ast_similarity=python_after_js.get('ast_similarity', 0.0), complexity=python_after_js.get('complexity', 1.0),
+        num_samples=python_after_js.get('num_samples', 0), language="python"
+    )
+    
+    task2_after_task2 = EvaluationResults(
+        bleu=js_after_js['bleu'], meteor=js_after_js.get('meteor', 0.0),
+        pass_rate=js_after_js.get('pass_rate', 0.0), edit_distance=js_after_js.get('edit_distance', 1.0),
+        ast_similarity=js_after_js.get('ast_similarity', 0.0), complexity=js_after_js.get('complexity', 1.0),
+        num_samples=js_after_js.get('num_samples', 0), language="javascript"
+    )
+    
+    # Use ContinualLearningEvaluator for consistent metrics calculation
+    dummy_evaluator = ModelEvaluator()  # No tokenizer needed for metrics calculation
+    cl_evaluator = ContinualLearningEvaluator(dummy_evaluator)
+    
+    return cl_evaluator.calculate_continual_learning_metrics(
+        baseline_task1, baseline_task2,
+        task1_after_task1, task2_after_task1,
+        task1_after_task2, task2_after_task2
+    )
 
 def run_single_experiment(learner_class, model_name: str, tokenizer, python_train, python_val, js_train, js_val, seed: int) -> ExperimentResults:
     """Run a single experimental trial with comprehensive evaluation metrics"""
