@@ -616,7 +616,7 @@ def calculate_continual_learning_metrics(baseline_python: Dict, baseline_js: Dic
 
 def run_single_experiment(learner_class, model_name: str, tokenizer, python_train, python_val, js_train, js_val, seed: int) -> ExperimentResults:
     """Run a single experimental trial with comprehensive evaluation metrics"""
-    set_seed(seed)
+    device_manager.set_seed(seed)
     log_message(f"Running {learner_class.__name__} experiment with seed {seed}")
     
     # Initialize learner and comprehensive evaluator
