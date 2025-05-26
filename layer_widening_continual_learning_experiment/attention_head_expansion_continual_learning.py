@@ -22,9 +22,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for model analyzer
+# Add utils to path for model analyzer and data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
+from utils.data_loader import load_and_prepare_data
 
 # ============================================================================
 # EXPERIMENT CONFIGURATION
@@ -920,72 +921,23 @@ class AttentionHeadExpansionContinualLearner:
         except:
             return False
 
-# Data loading functions (same as other experiments)
-def load_codesearchnet_data():
-    """Load CodeSearchNet dataset with exact same splits as other experiments"""
-    log_message("Loading CodeSearchNet dataset...")
-    
-    # Load datasets
-    python_dataset = load_dataset("code_search_net", "python", split="train")
-    javascript_dataset = load_dataset("code_search_net", "javascript", split="train")
-    
-    def prepare_data(dataset, language):
-        """Prepare data in the format expected by the model"""
-        data = []
-        for item in dataset:
-            if item['func_code_string'] and item['func_documentation_string']:
-                # Use docstring as input, code as target
-                input_text = f"Generate {language} code: {item['func_documentation_string']}"
-                target_text = item['func_code_string']
-                data.append({
-                    'input': input_text,
-                    'target': target_text
-                })
-        return data
-    
-    # Prepare datasets
-    python_data = prepare_data(python_dataset, "Python")
-    javascript_data = prepare_data(javascript_dataset, "JavaScript")
-    
-    # Use exact same splits as other experiments for fair comparison
-    random.seed(42)  # Ensure reproducibility
-    
-    # Python: 15,000 train, 5,000 validation
-    random.shuffle(python_data)
-    python_train = python_data[:15000]
-    python_val = python_data[15000:20000]
-    
-    # JavaScript: varies but use same random seed
-    random.shuffle(javascript_data)
-    js_train = javascript_data[:min(15000, len(javascript_data))]
-    js_val = javascript_data[min(15000, len(javascript_data)):min(20000, len(javascript_data))]
-    
-    log_message(f"Dataset prepared: Python train={len(python_train)}, val={len(python_val)}")
-    log_message(f"                  JavaScript train={len(js_train)}, val={len(js_val)}")
-    
-    return {
-        'python_train': python_train,
-        'python_val': python_val,
-        'javascript_train': js_train,
-        'javascript_val': js_val
-    }
-
 def run_attention_head_expansion_experiment():
     """Run the complete attention head expansion continual learning experiment"""
     log_message("Starting Attention Head Expansion Continual Learning Experiment")
     log_message("FAIR COMPARISON: Using EXACT same data splits as LoRA vs Full Layer experiment")
     
-    # Load data
-    datasets = load_codesearchnet_data()
-    
-    # Use full datasets for fair comparison
-    python_train = datasets['python_train']
-    python_val = datasets['python_val']
-    javascript_train = datasets['javascript_train']
-    javascript_val = datasets['javascript_val']
+    # Load data using the new unified data loader (dict format for attention expansion)
+    python_train, python_val, js_train, js_val = load_and_prepare_data(
+        python_train_size=15000,
+        python_val_size=5000,
+        js_train_size=15000,
+        js_val_size=5000,
+        format_type="dict",  # Attention expansion expects dict format with 'input'/'target' keys
+        seed=42
+    )
     
     log_message(f"Using full datasets: Python train={len(python_train)}, val={len(python_val)}")
-    log_message(f"Using full datasets: JavaScript train={len(javascript_train)}, val={len(javascript_val)}")
+    log_message(f"Using full datasets: JavaScript train={len(js_train)}, val={len(js_val)}")
     
     # Initialize model and tokenizer
     model_name = "Salesforce/codet5-small"
@@ -1031,11 +983,11 @@ def run_attention_head_expansion_experiment():
     js_learner = AttentionHeadExpansionContinualLearner(model_name, tokenizer, device, num_new_heads=NUM_NEW_ATTENTION_HEADS)
     js_learner.prepare_model()
     
-    javascript_training_time = js_learner.train_task(javascript_train, "javascript", epochs=2, batch_size=8)
+    javascript_training_time = js_learner.train_task(js_train, "javascript", epochs=2, batch_size=8)
     results['training_times']['javascript'] = javascript_training_time
     
     # Evaluate JavaScript after JavaScript training
-    js_bleu, js_pass_rate = js_learner.evaluate_task(javascript_val, "javascript", num_samples=500)
+    js_bleu, js_pass_rate = js_learner.evaluate_task(js_val, "javascript", num_samples=500)
     results['bleu_scores']['javascript_after_javascript'] = js_bleu
     results['pass_rates']['javascript_after_javascript'] = js_pass_rate
     log_message(f"JavaScript after JavaScript training: BLEU {js_bleu:.4f}, Pass Rate {js_pass_rate:.2f}%")

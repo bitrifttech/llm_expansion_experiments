@@ -22,9 +22,10 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for model analyzer
+# Add utils to path for model analyzer and data loader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
+from utils.data_loader import load_and_prepare_data
 
 # Set random seeds for reproducibility
 def set_seed(seed: int):
@@ -649,50 +650,6 @@ def get_memory_usage():
     """Get current memory usage in GB"""
     return psutil.virtual_memory().used / 1024**3
 
-def load_and_prepare_data():
-    """Load and prepare CodeSearchNet dataset - SAME AS OTHER EXPERIMENTS"""
-    log_message("Loading CodeSearchNet dataset...")
-    
-    try:
-        # Use the EXACT same approach as LoRA vs Full Layer experiment
-        dataset = load_dataset("code_search_net", split="train")
-        
-        # Filter and prepare datasets - SAME SPLITS AS OTHER EXPERIMENTS
-        python_data = dataset.filter(lambda x: x["language"] == "python").select(range(20000))
-        js_data = dataset.filter(lambda x: x["language"] == "javascript").select(range(20000))
-        
-        # Split into train/val - SAME AS OTHER EXPERIMENTS
-        python_train = python_data.select(range(15000))
-        python_val = python_data.select(range(15000, 20000))
-        js_train = js_data.select(range(15000))
-        js_val = js_data.select(range(15000, 20000))
-        
-        # Convert to the format expected by FFN expansion (dict format)
-        def convert_to_dict_format(dataset_split):
-            converted = []
-            for item in dataset_split:
-                if item['func_name'] and item['func_documentation_string'] and item['func_code_string']:
-                    converted.append({
-                        'func_name': item['func_name'],
-                        'docstring': item['func_documentation_string'],
-                        'code': item['func_code_string']
-                    })
-            return converted
-        
-        python_train_dict = convert_to_dict_format(python_train)
-        python_val_dict = convert_to_dict_format(python_val)
-        js_train_dict = convert_to_dict_format(js_train)
-        js_val_dict = convert_to_dict_format(js_val)
-        
-        log_message(f"Dataset prepared: Python train={len(python_train_dict)}, val={len(python_val_dict)}")
-        log_message(f"                  JavaScript train={len(js_train_dict)}, val={len(js_val_dict)}")
-        
-        return python_train_dict, python_val_dict, js_train_dict, js_val_dict
-        
-    except Exception as e:
-        log_message(f"Dataset loading error: {e}", level="ERROR")
-        sys.exit(1)
-
 def calculate_continual_learning_metrics(python_before: Dict, js_after_python: Dict,
                                        python_after_js: Dict, js_after_js: Dict) -> Dict[str, float]:
     """Calculate continual learning specific metrics"""
@@ -820,8 +777,15 @@ def main():
     model_name = "Salesforce/codet5-small"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
-    # Load data - SAME AS OTHER EXPERIMENTS
-    python_train, python_val, js_train, js_val = load_and_prepare_data()
+    # Load data using the new unified data loader (raw format for FFN expansion)
+    python_train, python_val, js_train, js_val = load_and_prepare_data(
+        python_train_size=15000,
+        python_val_size=5000,
+        js_train_size=15000,
+        js_val_size=5000,
+        format_type="raw",  # FFN expansion expects raw format with func_name, docstring, code keys
+        seed=42
+    )
     
     # Use same evaluation sample sizes as other experiments for consistency
     log_message(f"Using full datasets: Python train={len(python_train)}, val={len(python_val)}")
