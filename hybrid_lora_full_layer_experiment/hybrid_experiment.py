@@ -131,11 +131,11 @@ class HybridLoRAFullLayerLearner:
         """Create a model with both LoRA adapter and full layer"""
         if use_shared_layer and shared_layer_model is not None:
             # Use the shared full layer model as starting point
-            hybrid_model = self.hybrid_extension.create_hybrid_from_existing(shared_layer_model, task_name)
+            hybrid_model = self.hybrid_extension.create_hybrid_model(task_name, use_shared_layer=True, shared_layer_model=shared_layer_model)
             log_message(f"Using shared full layer for {task_name}")
         else:
             # Create new hybrid model with both LoRA and full layer
-            hybrid_model = self.hybrid_extension.create_hybrid(task_name)
+            hybrid_model = self.hybrid_extension.create_hybrid_model(task_name)
             log_message(f"Created new hybrid model for {task_name}")
         
         # Count trainable parameters

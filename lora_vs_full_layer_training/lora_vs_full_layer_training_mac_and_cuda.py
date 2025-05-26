@@ -281,7 +281,7 @@ class FullLayerContinualLearner(ContinualLearner):
         log_message(f"Training new transformer layer for {task_name}...")
         
         # Create model with additional layer
-        model = self.layer_extension.add_layer(task_name)
+        model = self.layer_extension.create_extended_model(task_name)
         
         # Verify only new layer is trainable
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
