@@ -68,7 +68,7 @@ class LoRAExtension:
         
         frozen_params = sum(1 for p in self.base_model.parameters() if not p.requires_grad)
         # Always log now
-            log_message(f"Froze {frozen_params} base model parameters")
+        log_message(f"Froze {frozen_params} base model parameters")
     
     def create_adapter(self, task_name: str) -> nn.Module:
         """Create a new LoRA adapter for a specific task"""
@@ -93,10 +93,10 @@ class LoRAExtension:
         lora_params = sum(p.numel() for n, p in lora_model.named_parameters() if 'lora' in n and p.requires_grad)
         
         # Always log now
-            log_message(
-                f"Created LoRA adapter for {task_name}: "
-                f"{lora_params:,} LoRA params / {trainable_params:,} trainable / {total_params:,} total"
-            )
+        log_message(
+            f"Created LoRA adapter for {task_name}: "
+            f"{lora_params:,} LoRA params / {trainable_params:,} trainable / {total_params:,} total"
+        )
         
         return lora_model
     
@@ -110,7 +110,7 @@ class LoRAExtension:
         self.adapters[task_name] = save_path
         
         # Always log now
-            log_message(f"LoRA adapter for {task_name} saved to {save_path}")
+        log_message(f"LoRA adapter for {task_name} saved to {save_path}")
         
         return save_path
     
@@ -129,7 +129,7 @@ class LoRAExtension:
         self.current_adapter = task_name
         
         # Always log now
-            log_message(f"Loaded LoRA adapter for {task_name}")
+        log_message(f"Loaded LoRA adapter for {task_name}")
         
         return adapter_model
     
@@ -172,7 +172,7 @@ class TransformerLayerExtension:
         
         frozen_params = sum(1 for p in self.base_model.parameters() if not p.requires_grad)
         # Always log now
-            log_message(f"Froze {frozen_params} base model parameters")
+        log_message(f"Froze {frozen_params} base model parameters")
     
     def create_extended_model(self, task_name: str) -> nn.Module:
         """Create a model with additional transformer layer(s)"""
@@ -187,11 +187,11 @@ class TransformerLayerExtension:
         trainable_params = sum(p.numel() for p in extended_model.parameters() if p.requires_grad)
         
         # Always log now
-            log_message(
-                f"Created extended model for {task_name}: "
-                f"{trainable_params:,} trainable / {total_params:,} total parameters "
-                f"({100*trainable_params/total_params:.2f}%)"
-            )
+        log_message(
+            f"Created extended model for {task_name}: "
+            f"{trainable_params:,} trainable / {total_params:,} total parameters "
+            f"({100*trainable_params/total_params:.2f}%)"
+        )
         
         return extended_model
     
@@ -239,7 +239,7 @@ class TransformerLayerExtension:
             
         except Exception as e:
             # Always log now
-                log_message(f"Error creating extended model: {e}", level="ERROR")
+            log_message(f"Error creating extended model: {e}", level="ERROR")
             raise
     
     def save_checkpoint(self, model: nn.Module, task_name: str, save_path: Optional[str] = None) -> str:
@@ -252,7 +252,7 @@ class TransformerLayerExtension:
         self.checkpoints[task_name] = save_path
         
         # Always log now
-            log_message(f"Model checkpoint for {task_name} saved to {save_path}")
+        log_message(f"Model checkpoint for {task_name} saved to {save_path}")
         
         return save_path
     
@@ -268,7 +268,7 @@ class TransformerLayerExtension:
         self.current_checkpoint = task_name
         
         # Always log now
-            log_message(f"Loaded checkpoint for {task_name}")
+        log_message(f"Loaded checkpoint for {task_name}")
         
         return model
     
@@ -309,12 +309,12 @@ class HybridExtension:
             # Use the shared layer model as starting point
             model_with_layer = deepcopy(shared_layer_model)
             # Always log now
-                log_message(f"Using shared layer for {task_name}")
+            log_message(f"Using shared layer for {task_name}")
         else:
             # Create new transformer layer
             model_with_layer = self.layer_extension._add_transformer_layer(self.base_model)
             # Always log now
-                log_message(f"Created new layer for {task_name}")
+            log_message(f"Created new layer for {task_name}")
         
         # Get the new layer index for later reference
         original_config = self.base_model.config
@@ -350,14 +350,14 @@ class HybridExtension:
                           if f'encoder.block.{new_layer_idx}' in n and p.requires_grad and 'lora' not in n)
         
         # Always log now
+        log_message(
+            f"Hybrid model for {task_name}: "
+            f"LoRA={lora_params:,}, Layer={layer_params:,}, Total={total_trainable:,}"
+        )
+        if re_enabled_count > 0:
             log_message(
-                f"Hybrid model for {task_name}: "
-                f"LoRA={lora_params:,}, Layer={layer_params:,}, Total={total_trainable:,}"
+                f"Re-enabled {re_enabled_count} layer parameters ({re_enabled_params:,} params)"
             )
-            if re_enabled_count > 0:
-                log_message(
-                    f"Re-enabled {re_enabled_count} layer parameters ({re_enabled_params:,} params)"
-                )
         
         return hybrid_model
     
@@ -371,7 +371,7 @@ class HybridExtension:
         self.hybrid_models[task_name] = save_path
         
         # Always log now
-            log_message(f"Hybrid model for {task_name} saved to {save_path}")
+        log_message(f"Hybrid model for {task_name} saved to {save_path}")
         
         return save_path
     
@@ -393,7 +393,7 @@ class HybridExtension:
             raise NotImplementedError("Loading hybrid model without base_with_layer not implemented")
         
         # Always log now
-            log_message(f"Loaded hybrid model for {task_name}")
+        log_message(f"Loaded hybrid model for {task_name}")
         
         return hybrid_model
 
