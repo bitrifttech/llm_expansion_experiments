@@ -22,14 +22,12 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for model evaluator
+# Add utils to path for model evaluator, model analyzer, data loader, and device manager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_evaluator import ModelEvaluator
-
-# Add utils to path for model analyzer and data loader
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
 from utils.data_loader import load_and_prepare_data
+from utils.device_manager import DeviceManager
 
 # ============================================================================
 # EXPERIMENT CONFIGURATION
@@ -37,42 +35,13 @@ from utils.data_loader import load_and_prepare_data
 NUM_NEW_ATTENTION_HEADS = 1  # Number of new attention heads to add per layer
 # ============================================================================
 
-# Set random seeds for reproducibility
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-set_seed(42)
-
-# Device configuration
-if torch.cuda.is_available():
-    device = "cuda"
-    print(f"Using CUDA GPU: {torch.cuda.get_device_name()}")
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    device = "mps"
-    print("Using Apple Silicon MPS")
-else:
-    device = "cpu"
-    print("Using CPU")
-
-# Memory info
-if device == "cuda":
-    gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-    print(f"Device: {device}, GPU Memory: {gpu_memory:.2f} GB")
-elif device == "mps":
-    system_memory = psutil.virtual_memory().total / (1024**3)
-    print(f"Device: {device}, System Memory: {system_memory:.2f} GB")
-else:
-    system_memory = psutil.virtual_memory().total / (1024**3)
-    print(f"Device: {device}, System Memory: {system_memory:.2f} GB")
+# Initialize device manager
+device_manager = DeviceManager()
+device = device_manager.device
 
 def log_message(message: str, level: str = "INFO"):
     """Log message with timestamp"""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
+    device_manager._log_message(message, level)
 
 def freeze_base_model(model):
     """Freeze all parameters in the base model"""
@@ -500,17 +469,11 @@ class AttentionHeadExpansionContinualLearner:
         
     def prepare_model(self) -> None:
         """Initialize the base model"""
-        # Force float32 on CUDA to avoid overflow issues
-        if device == "cuda":
-            torch_dtype = torch.float32
-            log_message("Using float32 on CUDA to prevent overflow")
-        else:
-            torch_dtype = torch.float32
-        
         self.base_model = T5ForConditionalGeneration.from_pretrained(
             self.model_name, 
-            torch_dtype=torch_dtype
+            torch_dtype=device_manager.torch_dtype
         ).to(self.device)
+        self.base_model = device_manager.optimize_for_device(self.base_model)
         
         log_message(f"Loaded base model: {self.model_name}")
         
@@ -850,6 +813,9 @@ def run_attention_head_expansion_experiment():
     """Run the complete attention head expansion continual learning experiment"""
     log_message("Starting Attention Head Expansion Continual Learning Experiment")
     log_message("FAIR COMPARISON: Using EXACT same data splits as LoRA vs Full Layer experiment")
+    
+    # Set seed for reproducibility
+    device_manager.set_seed(42)
     
     # Load data using the new unified data loader (dict format for attention expansion)
     python_train, python_val, js_train, js_val = load_and_prepare_data(

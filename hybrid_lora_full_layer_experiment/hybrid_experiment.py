@@ -23,18 +23,11 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for data loader and model evaluator
+# Add utils to path for data loader, model evaluator, and device manager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_loader import load_and_prepare_data
 from utils.model_evaluator import ModelEvaluator
-
-# Set random seeds for reproducibility
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+from utils.device_manager import DeviceManager
 
 @dataclass
 class HybridExperimentResults:
@@ -82,24 +75,13 @@ class HybridExperimentResults:
             }
         }
 
-# Logging setup
+# Initialize device manager
+device_manager = DeviceManager()
+device = device_manager.device
+
+# Logging setup (use device manager's logging)
 def log_message(message, level="INFO"):
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
-
-# Device setup
-if torch.cuda.is_available():
-    device = "cuda"
-    log_message("Using CUDA GPU")
-    log_message(f"GPU: {torch.cuda.get_device_name()}, Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-elif torch.backends.mps.is_available():
-    device = "mps"
-    log_message("Using Apple Silicon MPS")
-else:
-    device = "cpu"
-    log_message("Using CPU (no MPS or CUDA available)")
-
-log_message(f"Device: {device}, System Memory: {psutil.virtual_memory().total / 1024**3:.2f} GB")
+    device_manager._log_message(message, level)
 
 def freeze_base_model(model):
     """Freeze all base model parameters"""
@@ -164,8 +146,9 @@ class HybridLoRAFullLayerLearner:
         """Initialize the base model"""
         self.base_model = T5ForConditionalGeneration.from_pretrained(
             self.model_name, 
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            torch_dtype=device_manager.torch_dtype
         ).to(self.device)
+        self.base_model = device_manager.optimize_for_device(self.base_model)
         freeze_base_model(self.base_model)
         
     def create_hybrid_model(self, base_model, task_name: str, use_shared_layer: bool = False, shared_layer_model = None):
@@ -322,7 +305,7 @@ def get_memory_usage():
 def run_experiment_1_task_specific(learner, python_train, python_val, js_train, js_val, seed: int):
     """Experiment 1: Task-specific LoRA + Full Layer components"""
     log_message("=== EXPERIMENT 1: TASK-SPECIFIC COMPONENTS ===")
-    set_seed(seed)
+    device_manager.set_seed(seed)
     start_memory = get_memory_usage()
     
     # Phase 1: Train Python with LoRA + Full Layer
@@ -399,7 +382,7 @@ def run_experiment_1_task_specific(learner, python_train, python_val, js_train, 
 def run_experiment_2_shared_layer(learner, python_train, python_val, js_train, js_val, seed: int):
     """Experiment 2: Task-specific LoRA + Shared Full Layer"""
     log_message("=== EXPERIMENT 2: SHARED FULL LAYER ===")
-    set_seed(seed)
+    device_manager.set_seed(seed)
     start_memory = get_memory_usage()
     
     # Phase 1: Train Python with LoRA + Full Layer
@@ -526,8 +509,7 @@ def main():
     
     # Clean up experiment 1 resources
     del learner1
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()  # Clear GPU memory
+    device_manager.clear_cache()
     
     # Experiment 2: Shared full layer (start fresh)
     log_message("Initializing fresh learner for Experiment 2...")

@@ -22,22 +22,12 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for model evaluator
+# Add utils to path for model evaluator, model analyzer, data loader, and device manager
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_evaluator import ModelEvaluator
-
-# Add utils to path for model analyzer and data loader
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_analyzer import ModelAnalyzer, analyze_model
 from utils.data_loader import load_and_prepare_data
-
-# Set random seeds for reproducibility
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+from utils.device_manager import DeviceManager
 
 @dataclass
 class LayerWideningExperimentResults:
@@ -110,24 +100,13 @@ class LayerWideningExperimentResults:
             'expansion_percentage': self.expansion_percentage
         }
 
-# Logging setup
+# Initialize device manager
+device_manager = DeviceManager()
+device = device_manager.device
+
+# Logging setup (use device manager's logging)
 def log_message(message, level="INFO"):
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
-
-# Device setup
-if torch.cuda.is_available():
-    device = "cuda"
-    log_message("Using CUDA GPU")
-    log_message(f"GPU: {torch.cuda.get_device_name()}, Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-elif torch.backends.mps.is_available():
-    device = "mps"
-    log_message("Using Apple Silicon MPS")
-else:
-    device = "cpu"
-    log_message("Using CPU (no MPS or CUDA available)")
-
-log_message(f"Device: {device}, System Memory: {psutil.virtual_memory().total / 1024**3:.2f} GB")
+    device_manager._log_message(message, level)
 
 def freeze_base_model(model):
     """Freeze all base model parameters"""
@@ -282,8 +261,9 @@ class FFNExpansionContinualLearner:
         """Initialize the base model"""
         self.base_model = T5ForConditionalGeneration.from_pretrained(
             self.model_name, 
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            torch_dtype=device_manager.torch_dtype
         ).to(self.device)
+        self.base_model = device_manager.optimize_for_device(self.base_model)
         
         log_message(f"Loaded base model: {self.model_name}")
         
@@ -625,7 +605,7 @@ def run_ffn_expansion_experiment(model_name: str, tokenizer, python_train, pytho
     
     log_message("=== FFN EXPANSION CONTINUAL LEARNING EXPERIMENT ===")
     log_message(f"Expansion size: {expansion_size}")
-    set_seed(seed)
+    device_manager.set_seed(seed)
     start_memory = get_memory_usage()
     
     # Initialize learner
