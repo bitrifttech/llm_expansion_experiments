@@ -23,11 +23,12 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for model evaluator, data loader, and device manager
+# Add utils to path for model evaluator, data loader, device manager, and model extensions
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.model_evaluator import ModelEvaluator, ContinualLearningEvaluator
 from utils.data_loader import load_and_prepare_data
 from utils.device_manager import DeviceManager
+from utils.model_extensions import LoRAExtension, TransformerLayerExtension, ExtensionConfig
 
 @dataclass
 class ExperimentResults:
@@ -108,59 +109,7 @@ def freeze_base_model(model):
         param.requires_grad = False
     log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
 
-def add_trainable_transformer_layer(model):
-    """Add a new trainable transformer layer by creating a new model with extended architecture"""
-    from copy import deepcopy
-    import torch.nn as nn
-    
-    try:
-        # Instead of modifying the existing model, create a new one with extended architecture
-        original_config = model.config
-        
-        # Create new config with one additional layer
-        new_config = deepcopy(original_config)
-        new_config.num_layers = original_config.num_layers + 1
-        
-        # Create new model with extended architecture
-        new_model = T5ForConditionalGeneration(new_config).to(model.device)
-        
-        # Copy weights from original model to new model (except the new layer)
-        with torch.no_grad():
-            # Copy encoder layers
-            for i in range(original_config.num_layers):
-                new_model.encoder.block[i].load_state_dict(model.encoder.block[i].state_dict())
-            
-            # Copy decoder layers
-            for i in range(original_config.num_decoder_layers):
-                new_model.decoder.block[i].load_state_dict(model.decoder.block[i].state_dict())
-            
-            # Copy other components
-            new_model.shared.load_state_dict(model.shared.state_dict())
-            new_model.encoder.final_layer_norm.load_state_dict(model.encoder.final_layer_norm.state_dict())
-            new_model.decoder.final_layer_norm.load_state_dict(model.decoder.final_layer_norm.state_dict())
-            new_model.lm_head.load_state_dict(model.lm_head.state_dict())
-        
-        # Freeze all copied parameters
-        for param in new_model.parameters():
-            param.requires_grad = False
-        
-        # Only make the new encoder layer trainable
-        new_layer_idx = original_config.num_layers  # The new layer index
-        for param in new_model.encoder.block[new_layer_idx].parameters():
-            param.requires_grad = True
-            # Initialize with small random values
-            param.data = param.data * 0.01
-        
-        trainable_params = sum(p.numel() for p in new_model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in new_model.parameters())
-        
-        log_message(f"Created new model with additional layer: {trainable_params:,} trainable / {total_params:,} total parameters")
-        
-        return new_model
-        
-    except Exception as e:
-        log_message(f"Error creating extended model: {e}", level="ERROR")
-        raise
+# Removed add_trainable_transformer_layer function - now using TransformerLayerExtension class
 
 class ContinualLearner:
     """Base class for continual learning approaches"""
@@ -193,60 +142,49 @@ class ContinualLearner:
         raise NotImplementedError
 
 class LoRAContinualLearner(ContinualLearner):
-    """LoRA-based continual learning with proper adapter management"""
+    """LoRA-based continual learning using LoRAExtension class"""
     
     def __init__(self, model_name: str, tokenizer, device: str):
         super().__init__(model_name, tokenizer, device)
-        self.adapters = {}  # Store adapter paths
+        self.lora_extension = None
         self.current_task = None
         
     def prepare_model(self) -> None:
-        """Initialize the base model without LoRA"""
+        """Initialize the base model and LoRA extension"""
         super().prepare_model()
         self.current_model = self.base_model
+        
+        # Create LoRA extension configuration
+        config = ExtensionConfig(
+            lora_r=16,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            lora_target_modules=["q", "k", "v", "o", "wi_0", "wi_1", "wo"],
+            freeze_base=True
+        )
+        
+        # Initialize LoRA extension
+        self.lora_extension = LoRAExtension(self.base_model, config, device_manager)
         
     def train_task(self, train_data, task_name: str, epochs: int = 5, batch_size: int = 16) -> float:
         """Train LoRA adapter for specific task"""
         log_message(f"Training LoRA adapter for {task_name}...")
         
-        # Start with clean base model
-        model = deepcopy(self.base_model)
-        
-        # Configure LoRA
-        lora_config = LoraConfig(
-            r=16,  # Increased rank for better capacity
-            lora_alpha=32,
-            target_modules=["q", "k", "v", "o", "wi_0", "wi_1", "wo"],  # Include FFN layers
-            task_type="SEQ_2_SEQ_LM",
-            lora_dropout=0.1
-        )
-        
-        # Apply LoRA to model
-        model = get_peft_model(model, lora_config)
+        # Create LoRA adapter
+        model = self.lora_extension.create_adapter(task_name)
         
         # Train the adapter
         training_time = self._train_model(model, train_data, epochs, batch_size)
         
         # Save adapter
-        adapter_path = f"adapters/{task_name}"
-        os.makedirs(adapter_path, exist_ok=True)
-        model.save_pretrained(adapter_path)
-        self.adapters[task_name] = adapter_path
+        self.lora_extension.save_adapter(model, task_name)
         
-        log_message(f"LoRA adapter for {task_name} saved to {adapter_path}")
         return training_time
         
     def switch_to_task(self, task_name: str) -> None:
         """Switch to specific task adapter"""
-        if task_name not in self.adapters:
-            raise ValueError(f"No adapter found for task {task_name}")
-            
-        # Load base model and apply specific adapter
-        self.current_model = deepcopy(self.base_model)
-        self.current_model = PeftModel.from_pretrained(
-            self.current_model, 
-            self.adapters[task_name]
-        ).to(self.device)
+        # Load adapter using LoRA extension
+        self.current_model = self.lora_extension.load_adapter(task_name)
         self.current_task = task_name
         
         # Validation: Ensure model is properly loaded
@@ -313,29 +251,37 @@ class LoRAContinualLearner(ContinualLearner):
         return results
 
 class FullLayerContinualLearner(ContinualLearner):
-    """New layer training with task-specific layer swapping (fair comparison with LoRA)"""
+    """Layer-based continual learning using TransformerLayerExtension class"""
     
     def __init__(self, model_name: str, tokenizer, device: str):
         super().__init__(model_name, tokenizer, device)
+        self.layer_extension = None
         self.checkpoints = {}
         self.current_task = None
         
     def prepare_model(self) -> None:
-        """Initialize the base model and freeze its weights"""
+        """Initialize the base model and layer extension"""
         super().prepare_model()
         # Freeze all base model parameters
         freeze_base_model(self.base_model)
         log_message(f"Base model prepared with frozen weights")
         
+        # Create layer extension configuration
+        config = ExtensionConfig(
+            freeze_base=True,
+            layer_position="encoder",
+            layer_initialization_scale=0.01
+        )
+        
+        # Initialize layer extension
+        self.layer_extension = TransformerLayerExtension(self.base_model, config, device_manager)
+        
     def train_task(self, train_data, task_name: str, epochs: int = 5, batch_size: int = 16) -> float:
         """Train new transformer layer for specific task (independent, not cumulative)"""
         log_message(f"Training new transformer layer for {task_name}...")
         
-        # Always start with clean base model (like LoRA starts fresh each time)
-        model = deepcopy(self.base_model)
-            
-        # Add and configure new trainable layer for this specific task
-        model = add_trainable_transformer_layer(model)
+        # Create model with additional layer
+        model = self.layer_extension.add_layer(task_name)
         
         # Verify only new layer is trainable
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

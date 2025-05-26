@@ -23,11 +23,12 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings("ignore")
 
-# Add utils to path for data loader, model evaluator, and device manager
+# Add utils to path for data loader, model evaluator, device manager, and model extensions
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_loader import load_and_prepare_data
 from utils.model_evaluator import ModelEvaluator
 from utils.device_manager import DeviceManager
+from utils.model_extensions import LoRAExtension, TransformerLayerExtension, HybridExtension, ExtensionConfig
 
 @dataclass
 class HybridExperimentResults:
@@ -89,50 +90,10 @@ def freeze_base_model(model):
         param.requires_grad = False
     log_message(f"Froze {sum(1 for p in model.parameters() if not p.requires_grad)} base model parameters")
 
-def add_trainable_transformer_layer(model):
-    """Add a new trainable transformer layer"""
-    try:
-        original_config = model.config
-        new_config = deepcopy(original_config)
-        new_config.num_layers = original_config.num_layers + 1
-        
-        new_model = T5ForConditionalGeneration(new_config).to(model.device)
-        
-        # Copy weights from original model
-        with torch.no_grad():
-            for i in range(original_config.num_layers):
-                new_model.encoder.block[i].load_state_dict(model.encoder.block[i].state_dict())
-            
-            for i in range(original_config.num_decoder_layers):
-                new_model.decoder.block[i].load_state_dict(model.decoder.block[i].state_dict())
-            
-            new_model.shared.load_state_dict(model.shared.state_dict())
-            new_model.encoder.final_layer_norm.load_state_dict(model.encoder.final_layer_norm.state_dict())
-            new_model.decoder.final_layer_norm.load_state_dict(model.decoder.final_layer_norm.state_dict())
-            new_model.lm_head.load_state_dict(model.lm_head.state_dict())
-        
-        # Freeze all copied parameters
-        for param in new_model.parameters():
-            param.requires_grad = False
-        
-        # Only make the new encoder layer trainable
-        new_layer_idx = original_config.num_layers
-        for param in new_model.encoder.block[new_layer_idx].parameters():
-            param.requires_grad = True
-            param.data = param.data * 0.01
-        
-        trainable_params = sum(p.numel() for p in new_model.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in new_model.parameters())
-        
-        log_message(f"Created model with additional layer: {trainable_params:,} trainable / {total_params:,} total parameters")
-        return new_model
-        
-    except Exception as e:
-        log_message(f"Error creating extended model: {e}", level="ERROR")
-        raise
+# Removed add_trainable_transformer_layer function - now using TransformerLayerExtension class
 
 class HybridLoRAFullLayerLearner:
-    """Hybrid learner that combines LoRA adapters with full transformer layers"""
+    """Hybrid learner that combines LoRA adapters with full transformer layers using extension classes"""
     
     def __init__(self, model_name: str, tokenizer, device: str):
         self.model_name = model_name
@@ -140,10 +101,11 @@ class HybridLoRAFullLayerLearner:
         self.device = device
         self.base_model = None
         self.current_model = None
+        self.hybrid_extension = None
         self.shared_full_layer_model = None  # For experiment 2
         
     def prepare_model(self) -> None:
-        """Initialize the base model"""
+        """Initialize the base model and hybrid extension"""
         self.base_model = T5ForConditionalGeneration.from_pretrained(
             self.model_name, 
             torch_dtype=device_manager.torch_dtype
@@ -151,67 +113,36 @@ class HybridLoRAFullLayerLearner:
         self.base_model = device_manager.optimize_for_device(self.base_model)
         freeze_base_model(self.base_model)
         
+        # Create hybrid extension configuration
+        config = ExtensionConfig(
+            lora_r=16,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            lora_target_modules=["q", "k", "v", "o", "wi_0", "wi_1", "wo"],
+            freeze_base=True,
+            layer_position="encoder",
+            layer_initialization_scale=0.01
+        )
+        
+        # Initialize hybrid extension
+        self.hybrid_extension = HybridExtension(self.base_model, config, device_manager)
+        
     def create_hybrid_model(self, base_model, task_name: str, use_shared_layer: bool = False, shared_layer_model = None):
         """Create a model with both LoRA adapter and full layer"""
         if use_shared_layer and shared_layer_model is not None:
             # Use the shared full layer model as starting point
-            model_with_layer = deepcopy(shared_layer_model)
+            hybrid_model = self.hybrid_extension.create_hybrid_from_existing(shared_layer_model, task_name)
             log_message(f"Using shared full layer for {task_name}")
         else:
-            # Create new full layer
-            model_with_layer = add_trainable_transformer_layer(base_model)
-            log_message(f"Created new full layer for {task_name}")
+            # Create new hybrid model with both LoRA and full layer
+            hybrid_model = self.hybrid_extension.create_hybrid(task_name)
+            log_message(f"Created new hybrid model for {task_name}")
         
-        # Store which layer index is the new layer
-        original_config = base_model.config
-        new_layer_idx = original_config.num_layers
+        # Count trainable parameters
+        trainable_params = sum(p.numel() for p in hybrid_model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in hybrid_model.parameters())
         
-        log_message(f"New layer index: {new_layer_idx}")
-        
-        # Count parameters before LoRA
-        pre_lora_trainable = sum(p.numel() for p in model_with_layer.parameters() if p.requires_grad)
-        
-        # Configure LoRA
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=["q", "k", "v", "o", "wi_0", "wi_1", "wo"],
-            task_type="SEQ_2_SEQ_LM",
-            lora_dropout=0.1
-        )
-        
-        # Apply LoRA to the model with full layer
-        hybrid_model = get_peft_model(model_with_layer, lora_config)
-        
-        # CRITICAL: Re-enable training for the full layer parameters that LoRA froze
-        # LoRA changes parameter names and adds prefixes, so we need to match by layer index
-        re_enabled_count = 0
-        re_enabled_params = 0
-        
-        for name, param in hybrid_model.named_parameters():
-            # Check if this parameter belongs to our new layer (layer index = new_layer_idx)
-            if f'encoder.block.{new_layer_idx}' in name and not param.requires_grad:
-                param.requires_grad = True
-                re_enabled_count += 1
-                re_enabled_params += param.numel()
-        
-        log_message(f"Re-enabled training for {re_enabled_count} full layer parameters ({re_enabled_params:,} params)")
-        
-        # Count trainable parameters after LoRA fix
-        total_trainable = sum(p.numel() for p in hybrid_model.parameters() if p.requires_grad)
-        lora_params = sum(p.numel() for n, p in hybrid_model.named_parameters() if 'lora' in n and p.requires_grad)
-        
-        # Count full layer parameters (now trainable)
-        full_layer_params = sum(p.numel() for n, p in hybrid_model.named_parameters() 
-                               if f'encoder.block.{new_layer_idx}' in n and p.requires_grad and 'lora' not in n)
-        
-        # Verify the math
-        expected_total = lora_params + full_layer_params
-        if abs(total_trainable - expected_total) > 10:  # Allow small rounding differences
-            log_message(f"WARNING: Parameter count mismatch. Total={total_trainable}, Expected={expected_total}", level="WARNING")
-            log_message(f"  LoRA: {lora_params:,}, Full Layer: {full_layer_params:,}", level="WARNING")
-        
-        log_message(f"Hybrid model for {task_name}: LoRA={lora_params:,}, Full Layer={full_layer_params:,}, Total={total_trainable:,}")
+        log_message(f"Hybrid model created: {trainable_params:,} trainable / {total_params:,} total parameters")
         
         return hybrid_model
         
