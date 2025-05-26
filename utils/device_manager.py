@@ -119,10 +119,15 @@ class DeviceManager:
         )
     
     def _log_message(self, message: str, level: str = "INFO"):
-        """Log message with timestamp"""
+        """Log message using experiment logger"""
         if self.verbose:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}] [{level}] {message}")
+            try:
+                from .experiment_logger import log_message
+                log_message(message, level)
+            except ImportError:
+                # Fallback to simple print if experiment_logger not available
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[{timestamp}] [{level}] {message}")
     
     def _log_device_info(self):
         """Log detailed device information"""
