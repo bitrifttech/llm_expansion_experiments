@@ -24,16 +24,18 @@ class DeviceManager:
     memory information, and consistent configuration across experiments.
     """
     
-    def __init__(self, preferred_device: Optional[str] = None, verbose: bool = True):
+    def __init__(self, preferred_device: Optional[str] = None, verbose: bool = True, experiment_name: Optional[str] = None):
         """
         Initialize device manager.
         
         Args:
             preferred_device: Force specific device ("cuda", "mps", "cpu")
             verbose: Enable detailed logging
+            experiment_name: Name of the experiment for logging purposes
         """
         self.preferred_device = preferred_device
         self.verbose = verbose
+        self.experiment_name = experiment_name
         self.device_info = self._detect_device()
         
         if self.verbose:
@@ -122,8 +124,39 @@ class DeviceManager:
         """Log message using experiment logger"""
         if self.verbose:
             try:
-                from .experiment_logger import log_message
-                log_message(message, level)
+                if self.experiment_name:
+                    # Use experiment-specific logging with proper path
+                    from .experiment_logger import get_experiment_logger
+                    import os
+                    # Find the actual experiment file in the project
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    experiment_file = os.path.join(project_root, f"{self.experiment_name}.py")
+                    
+                    # Check common experiment directories
+                    possible_paths = [
+                        experiment_file,
+                        os.path.join(project_root, "lora_vs_full_layer_training", f"{self.experiment_name}.py"),
+                        os.path.join(project_root, "layer_widening_continual_learning_experiment", f"{self.experiment_name}.py"),
+                        os.path.join(project_root, "hybrid_lora_full_layer_experiment", f"{self.experiment_name}.py"),
+                    ]
+                    
+                    # Use the first existing path, or create a default one
+                    actual_experiment_file = None
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            actual_experiment_file = path
+                            break
+                    
+                    if actual_experiment_file is None:
+                        # Default to the first possibility
+                        actual_experiment_file = possible_paths[1]  # lora_vs_full_layer_training directory
+                    
+                    logger = get_experiment_logger(actual_experiment_file)
+                    logger.log(level, message)
+                else:
+                    # Fallback to auto-detection
+                    from .experiment_logger import log_message
+                    log_message(message, level)
             except ImportError:
                 # Fallback to simple print if experiment_logger not available
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")

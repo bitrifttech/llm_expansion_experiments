@@ -95,8 +95,8 @@ class ExperimentResults:
             'forgetting_rate': self.forgetting_rate
         }
 
-# Initialize device manager
-device_manager = DeviceManager()
+# Initialize device manager with experiment name
+device_manager = DeviceManager(experiment_name="lora_vs_full_layer_training_mac_and_cuda")
 device = device_manager.device
 
 # Logging setup (use device manager's logging)
